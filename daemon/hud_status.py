@@ -5,13 +5,12 @@ The terminal analogue of the proactive Telegram summaries the daemon already
 sends: glanceable state without running the full `/squeezer:status` report.
 
 Reused in three places so there's exactly one place this line is assembled:
-- SQUEEZER_HOME's own Claude Code statusLine (wired up by
-  daemon/install_statusline.py during `/squeezer:setup`) — only active in
-  sessions opened at SQUEEZER_HOME. It's written to
-  SQUEEZER_HOME/.claude/settings.json, a *project*-scoped settings file,
-  which Claude Code's settings precedence ranks above a *user*-scoped
-  ~/.claude/settings.json — so it wins over (without touching) any global
-  statusLine a plugin like claude-hud installs there.
+- Claude Code's statusLine, in every session (wired up by
+  daemon/install_statusline.py during `/squeezer:setup`). It's chained onto
+  the global ~/.claude/settings.json statusLine command — appended as an
+  extra line after whatever was already configured there (e.g. a plugin
+  like claude-hud) rather than replacing it, since statusLine renders one
+  row per line of stdout.
 - The first line of `/squeezer:status`'s report.
 - A header telegram_lib.send_message prepends to every message.
 
