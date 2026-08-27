@@ -325,7 +325,15 @@ def cmd_check():
     turns, since total_used_since() (hud_status's usage bars, and the
     daemon's own budget pacing) needs a "total usage" pointer that survives
     squeezer running its own turns.
+
+    Also opportunistically rolls an overdue window (see maybe_roll_window)
+    before reading state: this hook fires on every tool call in every
+    session, human or squeezer, independent of whether the daemon's own
+    self_calibrate_loop timer is even running — so it catches a stale window
+    left behind by a dead/missing daemon far sooner than waiting for that
+    timer's next 20-minute tick after the daemon comes back.
     """
+    maybe_roll_window()
     payload = json.load(sys.stdin)
     transcript_path = payload.get("transcript_path")
     is_squeezer_turn = _is_squeezer_cwd(payload.get("cwd"))
@@ -493,9 +501,11 @@ def cmd_self_calibrate():
         sys.exit(1)
 
 
-def cmd_roll_window(final_transcript_path: str = None):
-    """Called by the daemon when it detects the window has reset: record the
-    just-finished window's total, recompute the rolling estimate, reset."""
+def roll_window(final_transcript_path: str = None) -> dict:
+    """Non-exiting core of window rolling, shared by cmd_roll_window (manual
+    CLI) and maybe_roll_window (automatic, timer-driven): records the
+    just-finished window's total, recomputes the rolling estimate from
+    recent window history, and starts a fresh window."""
     state = load_state()
     if final_transcript_path:
         final_total = sum_usage_since(final_transcript_path, state["window_start_ts"])
@@ -506,7 +516,42 @@ def cmd_roll_window(final_transcript_path: str = None):
     state["window_start_ts"] = now_iso()
     state["squeezer_transcript_paths"] = []
     save_state(state)
-    print(f"window rolled: start={state['window_start_ts']} estimated_total={state['estimated_window_total']}")
+    return {"window_start_ts": state["window_start_ts"], "estimated_window_total": state["estimated_window_total"]}
+
+
+def cmd_roll_window(final_transcript_path: str = None):
+    """Called by the daemon when it detects the window has reset: record the
+    just-finished window's total, recompute the rolling estimate, reset."""
+    result = roll_window(final_transcript_path)
+    print(f"window rolled: start={result['window_start_ts']} estimated_total={result['estimated_window_total']}")
+
+
+WINDOW_PERIOD = timedelta(hours=5)
+
+
+def maybe_roll_window(now: datetime | None = None) -> dict | None:
+    """Automatic counterpart to the manual `roll-window` CLI: rolls the
+    window once WINDOW_PERIOD has actually elapsed since window_start_ts.
+    Nothing else in the codebase ever detected a real window reset despite
+    cmd_roll_window's own docstring assuming a caller like this existed —
+    daemon.py's self_calibrate_loop only ever refreshed
+    estimated_window_total, never window_start_ts, so it grew stale
+    indefinitely (skewing both that estimate and the reserve gate, both of
+    which measure "used since window_start_ts"). Call this periodically
+    (self_calibrate_loop, alongside self_calibrate()) instead.
+
+    Uses find_known_transcript_path() (the most recently seen transcript,
+    regardless of whose turn it was — same fallback calibrate_window()
+    already uses) as the just-finished window's stand-in for
+    past_window_totals. Returns roll_window()'s result if it rolled, None
+    if the window's still current — including right after this state was
+    first created, since load_state() seeds window_start_ts to now."""
+    now = now or datetime.now(timezone.utc)
+    state = load_state()
+    window_start = datetime.fromisoformat(state["window_start_ts"])
+    if now - window_start < WINDOW_PERIOD:
+        return None
+    return roll_window(find_known_transcript_path())
 
 
 def cmd_status():

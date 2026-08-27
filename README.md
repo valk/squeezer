@@ -152,6 +152,18 @@ plugin on the new machine and run `/squeezer:setup` again with that
 machine's real projects; `SQUEEZER_HOME` is where all machine/user-specific
 state lives.
 
+## Uninstalling
+
+`/plugin uninstall` removes squeezer from Claude Code's plugin list, but it
+doesn't know squeezer also registered a background OS service and edited
+your global `~/.claude/settings.json` statusLine during `/squeezer:setup`.
+Run `/squeezer:uninstall` (before or after) to tear those down — it stops
+the daemon service and strips just squeezer's own line from the statusLine,
+leaving any other chained statusline command (e.g. claude-hud) intact. It
+never touches `SQUEEZER_HOME` — your registered projects, TODOs, worklog,
+and Telegram credentials are yours to remove by hand if you actually want
+them gone.
+
 ## Escalation and safety
 
 See `templates/ESCALATION_POLICY.md.template` (copied to

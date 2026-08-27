@@ -366,6 +366,9 @@ def self_calibrate_loop(stop_event: threading.Event):
         result = usage_lib.self_calibrate()
         if not result.get("ok"):
             log(f"self-calibrate failed (will retry next interval): {result.get('error')}")
+        rolled = usage_lib.maybe_roll_window()
+        if rolled:
+            log(f"window rolled: start={rolled['window_start_ts']} estimated_total={rolled['estimated_window_total']}")
 
 
 def main():

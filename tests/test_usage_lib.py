@@ -250,6 +250,30 @@ def test_cmd_check_allows_when_no_transcript_path(window_state_path, monkeypatch
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+def test_cmd_check_rolls_an_overdue_window_before_checking(window_state_path, monkeypatch, capsys):
+    """Regression: window rollover previously only ever happened on the
+    daemon's own 20-minute self_calibrate_loop timer, so a window left stale
+    by a dead/missing daemon (see daemon/hud_status.py's "squeezed: 11%
+    despite squeezer not having run this window" bug) stayed stale until the
+    daemon came back AND ticked again. This hook fires on every tool call in
+    every session regardless of daemon uptime, so it must self-heal a
+    window overdue for a roll before computing anything against it."""
+    import io
+    stale_start = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    usage_lib.save_state({
+        "window_start_ts": stale_start,
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": True,
+        "squeezer_transcript_paths": ["/fake/old-window-squeezer-turn.jsonl"],
+    })
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps({})))
+    usage_lib.cmd_check()
+    state = usage_lib.load_state()
+    assert state["window_start_ts"] != stale_start
+    assert state["squeezer_transcript_paths"] == []
+
+
 def test_cmd_check_denies_when_reserve_breached_for_squeezer_cwd(window_state_path, monkeypatch, capsys, tmp_path):
     """The reserve only gates squeezer's own daemon-spawned turns (cwd ==
     squeezer_home(), see daemon.spawn_claude)."""
@@ -468,6 +492,86 @@ def test_cmd_roll_window_resets_squeezer_transcript_paths(window_state_path, cap
     })
     usage_lib.cmd_roll_window()
     assert usage_lib.load_state()["squeezer_transcript_paths"] == []
+
+
+def test_roll_window_returns_new_state(window_state_path):
+    usage_lib.save_state({
+        "window_start_ts": "2026-08-27T00:00:00+00:00",
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": False,
+        "squeezer_transcript_paths": ["/fake/old.jsonl"],
+    })
+    result = usage_lib.roll_window()
+    assert result["window_start_ts"] != "2026-08-27T00:00:00+00:00"
+    assert result["estimated_window_total"] == usage_lib.DEFAULT_ESTIMATE
+
+
+# --- maybe_roll_window: automatic counterpart to the manual roll-window CLI
+# — see its docstring for why this exists (nothing else ever detected a
+# real window reset, so window_start_ts grew stale indefinitely) ---
+
+def test_maybe_roll_window_noop_when_period_not_elapsed(window_state_path):
+    start = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    usage_lib.save_state({
+        "window_start_ts": start.isoformat(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": True,
+        "squeezer_transcript_paths": ["/fake/old.jsonl"],
+    })
+    result = usage_lib.maybe_roll_window(now=start + timedelta(hours=4, minutes=59))
+    assert result is None
+    assert usage_lib.load_state()["window_start_ts"] == start.isoformat()
+    assert usage_lib.load_state()["squeezer_transcript_paths"] == ["/fake/old.jsonl"]
+
+
+def test_maybe_roll_window_rolls_once_period_elapsed(window_state_path, monkeypatch):
+    start = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    usage_lib.save_state({
+        "window_start_ts": start.isoformat(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": True,
+        "squeezer_transcript_paths": ["/fake/old.jsonl"],
+    })
+    monkeypatch.setattr(usage_lib, "find_known_transcript_path", lambda: None)
+
+    result = usage_lib.maybe_roll_window(now=start + timedelta(hours=5, minutes=1))
+
+    assert result is not None
+    assert result["window_start_ts"] != start.isoformat()
+    state = usage_lib.load_state()
+    assert state["window_start_ts"] == result["window_start_ts"]
+    assert state["squeezer_transcript_paths"] == []
+
+
+def test_maybe_roll_window_sums_last_known_transcript_into_history(window_state_path, monkeypatch, tmp_path):
+    start = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    usage_lib.save_state({
+        "window_start_ts": start.isoformat(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+        "squeezer_transcript_paths": [],
+    })
+    transcript = tmp_path / "last.jsonl"
+    transcript.write_text(json.dumps({
+        "timestamp": (start + timedelta(hours=1)).isoformat(),
+        "message": {"usage": {"input_tokens": 500}},
+    }) + "\n")
+    monkeypatch.setattr(usage_lib, "find_known_transcript_path", lambda: str(transcript))
+
+    usage_lib.maybe_roll_window(now=start + timedelta(hours=5, minutes=1))
+
+    assert usage_lib.load_state()["past_window_totals"] == [500]
+
+
+def test_maybe_roll_window_noop_right_after_state_created(window_state_path):
+    """load_state() seeds a brand-new window's window_start_ts to now — must
+    not be treated as already-elapsed."""
+    result = usage_lib.maybe_roll_window()
+    assert result is None
 
 
 def test_parse_usage_output_with_minutes():
