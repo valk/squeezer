@@ -31,12 +31,13 @@ import usage_lib  # noqa: E402
 _OPEN_RE = re.compile(r"^\s*-\s*\[ \]", re.MULTILINE)
 _BLOCKED_RE = re.compile(r"^\s*-\s*\[b\]", re.MULTILINE)
 
-# --- squeezer-specific usage bars (yellow/green "lemony" palette, distinct
-# from claude-hud's own Usage bar) ---
+# --- squeezer-specific usage bars ("lemony" palette, distinct from
+# claude-hud's own Usage bar) ---
 _BAR_WIDTH = 5
 _ANSI_RESET = "\x1b[0m"
 _ANSI_YELLOW = "\x1b[33m"
 _ANSI_GREEN = "\x1b[32m"
+_ANSI_CYAN = "\x1b[36m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -58,10 +59,17 @@ def _bar(percent: float, color: str, width: int = _BAR_WIDTH) -> str:
     return f"{color}{glyphs}{_ANSI_RESET}"
 
 
-def _squeezer_usage_fragments(of_used_percent: float, of_window_percent: float) -> list[str]:
+def _squeezer_usage_fragments(
+    of_used_percent: float,
+    of_window_percent: float,
+    of_budget_percent: float,
+    budget_of_window_percent: float,
+) -> list[str]:
     return [
         f"{_bar(of_used_percent, _ANSI_YELLOW)} {of_used_percent:.0f}% of used",
         f"{_bar(of_window_percent, _ANSI_GREEN)} {of_window_percent:.1f}% of window",
+        f"{_bar(of_budget_percent, _ANSI_CYAN)} {of_budget_percent:.0f}% of budget",
+        f"budget {budget_of_window_percent:.0f}% of window",
     ]
 
 
@@ -103,6 +111,8 @@ def build_status_line(
     paused: bool,
     squeezer_used_percent: float | None,
     squeezer_window_percent: float | None,
+    squeezer_budget_percent: float | None,
+    squeezer_budget_of_window_percent: float | None,
     open_count: int,
     blocked_count: int,
     project_count: int,
@@ -111,12 +121,34 @@ def build_status_line(
 ) -> str:
     """Pure assembly of the ranked fragments (state -> squeezer's usage bars
     -> TODOs -> insight), truncated to `width` columns if given (0/falsy =
-    no limit). squeezer_used_percent/squeezer_window_percent both None omits
+    no limit). The four squeezer_* percents come as a set — all None omits
     the usage bars entirely (uncalibrated window, same fail-open convention
-    as the rest of usage_lib) rather than showing them as zero."""
+    as the rest of usage_lib) rather than showing them as zero:
+    - squeezer_used_percent: squeezer's share of tokens used so far this
+      window (human + squeezer combined) — e.g. 7% of a 14%-used window is
+      50% "of used".
+    - squeezer_window_percent: squeezer's usage as a share of the full
+      window capacity (independent of how much of the window is used so
+      far) — the 7% itself in the example above.
+    - squeezer_budget_percent: squeezer's usage as a share of its own
+      *allowed* budget this window (estimated_window_total minus the
+      configured reserve — 0 reserve, i.e. 100%, during no_reserve_hours) —
+      how close squeezer is to its own cap right now.
+    - squeezer_budget_of_window_percent: how much of the full window
+      squeezer's allowed budget itself represents (100% minus the reserve
+      percent) — varies with time of day via no_reserve_hours."""
     parts = [_mode_fragment(mode, paused)]
-    if squeezer_used_percent is not None and squeezer_window_percent is not None:
-        parts.extend(_squeezer_usage_fragments(squeezer_used_percent, squeezer_window_percent))
+    if all(
+        p is not None
+        for p in (
+            squeezer_used_percent, squeezer_window_percent,
+            squeezer_budget_percent, squeezer_budget_of_window_percent,
+        )
+    ):
+        parts.extend(_squeezer_usage_fragments(
+            squeezer_used_percent, squeezer_window_percent,
+            squeezer_budget_percent, squeezer_budget_of_window_percent,
+        ))
     parts.append(_todo_fragment(open_count, blocked_count, project_count))
     if last_insight:
         parts.append(last_insight)
@@ -126,9 +158,9 @@ def build_status_line(
     return line
 
 
-def _squeezer_usage_percents() -> tuple[float, float] | None:
-    """(percent of this window's used tokens that were squeezer's own,
-    percent of the full window capacity squeezer has used) — None if the
+def _squeezer_usage_percents() -> tuple[float, float, float, float] | None:
+    """(of_used, of_window, of_budget, budget_of_window) — see
+    build_status_line's docstring for what each means — or None if the
     window hasn't been calibrated yet (same fail-open convention as the
     rest of usage_lib).
 
@@ -145,9 +177,14 @@ def _squeezer_usage_percents() -> tuple[float, float] | None:
         return None
     total_used = usage_lib.total_used_since(state)
     squeezer_used = usage_lib.sum_squeezer_usage_since(state["window_start_ts"])
+    estimated_total = state["estimated_window_total"]
+    allowed_max = estimated_total * (1 - usage_lib.load_reserve_percent() / 100)
+
     of_used = 100 * squeezer_used / total_used if total_used else 0.0
-    of_window = 100 * squeezer_used / state["estimated_window_total"]
-    return of_used, of_window
+    of_window = 100 * squeezer_used / estimated_total
+    of_budget = 100 * squeezer_used / allowed_max if allowed_max else 0.0
+    budget_of_window = 100 * allowed_max / estimated_total
+    return of_used, of_window, of_budget, budget_of_window
 
 
 def _todo_counts() -> tuple[int, int, int]:
@@ -204,12 +241,17 @@ def current_status_line(width: int = None) -> str:
     cfg = _config.load_config()
     open_count, blocked_count, project_count = _todo_counts()
     usage_percents = _squeezer_usage_percents()
-    squeezer_used_percent, squeezer_window_percent = usage_percents if usage_percents else (None, None)
+    (
+        squeezer_used_percent, squeezer_window_percent,
+        squeezer_budget_percent, squeezer_budget_of_window_percent,
+    ) = usage_percents if usage_percents else (None, None, None, None)
     return build_status_line(
         mode=cfg.get("mode", "auto"),
         paused=(_config.state_dir() / "paused").exists(),
         squeezer_used_percent=squeezer_used_percent,
         squeezer_window_percent=squeezer_window_percent,
+        squeezer_budget_percent=squeezer_budget_percent,
+        squeezer_budget_of_window_percent=squeezer_budget_of_window_percent,
         open_count=open_count,
         blocked_count=blocked_count,
         project_count=project_count,

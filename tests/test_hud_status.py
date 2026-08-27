@@ -31,12 +31,15 @@ def test_build_status_line_includes_all_ranked_fragments():
     line = hud_status.build_status_line(
         mode="auto", paused=False,
         squeezer_used_percent=50.0, squeezer_window_percent=2.5,
+        squeezer_budget_percent=30.0, squeezer_budget_of_window_percent=80.0,
         open_count=5, blocked_count=1, project_count=2,
         last_insight="fixed the flaky test",
     )
     assert "auto" in line
     assert "50% of used" in line
     assert "2.5% of window" in line
+    assert "30% of budget" in line
+    assert "budget 80% of window" in line
     assert "█" in line and "░" in line
     assert "5 open, 1 blocked (2 proj)" in line
     assert "fixed the flaky test" in line
@@ -46,6 +49,7 @@ def test_build_status_line_shows_paused():
     line = hud_status.build_status_line(
         mode="auto", paused=True,
         squeezer_used_percent=None, squeezer_window_percent=None,
+        squeezer_budget_percent=None, squeezer_budget_of_window_percent=None,
         open_count=0, blocked_count=0, project_count=0, last_insight=None,
     )
     assert "auto·paused" in line
@@ -55,16 +59,19 @@ def test_build_status_line_omits_usage_bars_when_uncalibrated():
     line = hud_status.build_status_line(
         mode="human_in_loop", paused=False,
         squeezer_used_percent=None, squeezer_window_percent=None,
+        squeezer_budget_percent=None, squeezer_budget_of_window_percent=None,
         open_count=1, blocked_count=0, project_count=1, last_insight=None,
     )
     assert "of used" not in line
     assert "of window" not in line
+    assert "of budget" not in line
 
 
 def test_build_status_line_no_projects_registered():
     line = hud_status.build_status_line(
         mode="auto", paused=False,
         squeezer_used_percent=None, squeezer_window_percent=None,
+        squeezer_budget_percent=None, squeezer_budget_of_window_percent=None,
         open_count=0, blocked_count=0, project_count=0, last_insight=None,
     )
     assert "no projects registered" in line
@@ -74,6 +81,7 @@ def test_build_status_line_omits_blocked_when_zero():
     line = hud_status.build_status_line(
         mode="auto", paused=False,
         squeezer_used_percent=None, squeezer_window_percent=None,
+        squeezer_budget_percent=None, squeezer_budget_of_window_percent=None,
         open_count=3, blocked_count=0, project_count=1, last_insight=None,
     )
     assert "3 open (1 proj)" in line
@@ -84,6 +92,7 @@ def test_build_status_line_truncates_to_width():
     line = hud_status.build_status_line(
         mode="auto", paused=False,
         squeezer_used_percent=87.0, squeezer_window_percent=13.0,
+        squeezer_budget_percent=95.0, squeezer_budget_of_window_percent=80.0,
         open_count=5, blocked_count=1, project_count=2,
         last_insight="a very long worklog snippet that should get cut off",
         width=30,
@@ -189,12 +198,15 @@ def _write_calibrated_state(tmp_path, total_used, squeezer_used, estimated_windo
 def test_current_status_line_shows_squeezer_usage_bars(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)
-    _write_config(tmp_path)
+    _write_config(tmp_path)  # reserve_percent defaults to 20 -> budget is 80% of the window
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
     assert "40% of used" in line
     assert "4.0% of window" in line
+    # budget = 10000 * 0.8 = 8000; 400/8000 = 5%
+    assert "5% of budget" in line
+    assert "budget 80% of window" in line
 
 
 def test_current_status_line_shows_zero_percent_bars_when_squeezer_has_not_run_yet(tmp_path, monkeypatch):
@@ -206,6 +218,22 @@ def test_current_status_line_shows_zero_percent_bars_when_squeezer_has_not_run_y
     line = hud_status.current_status_line()
     assert "0% of used" in line
     assert "0.0% of window" in line
+    assert "0% of budget" in line
+    assert "budget 80% of window" in line
+
+
+def test_current_status_line_of_budget_reflects_no_reserve_hours(tmp_path, monkeypatch):
+    """During the configured no_reserve_hours window, load_reserve_percent()
+    returns 0 — squeezer's whole budget IS the window, e.g. at night."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.delenv("COLUMNS", raising=False)
+    _write_config(tmp_path, no_reserve_hours={"start": "00:00", "end": "23:59"})
+    _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
+
+    line = hud_status.current_status_line()
+    # budget = 10000 * 1.0 = 10000; 400/10000 = 4%
+    assert "4% of budget" in line
+    assert "budget 100% of window" in line
 
 
 def test_of_used_stays_bounded_across_multiple_squeezer_turns(tmp_path, monkeypatch):
@@ -247,6 +275,8 @@ def test_of_used_stays_bounded_across_multiple_squeezer_turns(tmp_path, monkeypa
     # squeezer_used=270, total=100+270=370 -> ~73%, never >= 100%.
     assert "73% of used" in line
     assert "100% of used" not in line
+    # budget = 10000 * 0.8 = 8000; 270/8000 ~= 3.4%
+    assert "3% of budget" in line
 
 
 def test_current_status_line_omits_usage_bars_when_uncalibrated(tmp_path, monkeypatch):
@@ -258,6 +288,7 @@ def test_current_status_line_omits_usage_bars_when_uncalibrated(tmp_path, monkey
     line = hud_status.current_status_line()
     assert "of used" not in line
     assert "of window" not in line
+    assert "of budget" not in line
 
 
 def test_current_status_line_includes_latest_worklog_insight(tmp_path, monkeypatch):
