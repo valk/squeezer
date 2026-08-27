@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "description": "Autonomous multi-project dev orchestrator: a background daemon that works through TODOs across your local git repos, talks to you over Telegram, and can hand control back to you (human-in-loop mode) whenever a fresh budget window opens.",
   "author": {
-    "name": "user"
+    "name": "valk"
   },
   "homepage": "https://github.com/valk/squeezer",
   "license": "MIT",
-  "keywords": ["orchestrator", "telegram", "automation", "multi-project"]
+  "keywords": ["orchestrator", "telegram", "automation", "multi-project", "claude-code", "ai-agent", "background-agent", "autonomous-agent", "productivity", "devtools", "telegram-bot"]
 }

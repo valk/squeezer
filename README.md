@@ -1,21 +1,53 @@
-# squeezer — autonomous multi-project dev orchestrator (Claude Code plugin)
+# squeezer
 
-A background daemon that works through TODOs across several of your local
-git repos, falls back to generic maintenance work (`ROUTINE.md`) when idle,
-and talks to you over Telegram — proactively surfacing summaries and
-top-priority findings, escalating only genuinely in-doubt decisions, and
-always keeping a configurable slice of the current 5-hour usage window free
-so you can grab manual control if something looks wrong. An optional
+**Your Claude Code TODOs, worked while you're not watching.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-5A32A3)](https://github.com/valk/squeezer)
+[![GitHub stars](https://img.shields.io/github/stars/valk/squeezer?style=social)](https://github.com/valk/squeezer/stargazers)
+
+Claude Code's 5-hour usage window resets whether or not you're at your
+keyboard for it. squeezer is a background daemon that spends that time for
+you: it works through per-project TODO lists across your local git repos,
+texts you the results over Telegram, escalates only the genuinely in-doubt
+calls, and always keeps a configurable slice of the window free so you can
+grab manual control the moment something looks off. An optional
 human-in-loop mode hands control back to you at the start of every fresh
-budget window (or once a day) instead of running fully unattended.
+window (or once a day) instead of running fully unattended.
 
-squeezer is a **Claude Code plugin** — install it once, then run
-`/squeezer:setup` inside any Claude Code session. There's no tmux session and
-no interactive pane to babysit: the daemon spawns a fresh headless
-`claude -p --resume <session-id>` turn whenever there's work to do, resuming
-the same ongoing conversation each time, and survives Claude Code's Pro-plan
-5-hour rate-limit resets by simply waiting for the next window rather than
-needing a wrapper to keep a live session alive through the reset.
+There's no tmux session and no interactive pane to babysit: the daemon
+spawns a fresh headless `claude -p --resume <session-id>` turn whenever
+there's work to do, resuming the same ongoing conversation each time, and
+rides out Pro-plan rate-limit resets by simply waiting for the next window.
+
+## Why squeezer, not a cron job
+
+- **Budget-aware, not just time-aware** — it sums real token usage from the
+  session transcript and enforces a reserve in code, not by asking the model
+  nicely.
+- **Talks to you, doesn't just log** — Telegram summaries and escalations,
+  not a file you forget to check.
+- **Survives rate-limit resets** — no long-lived process to babysit through
+  a 5-hour window; it resumes the same conversation on the next run.
+- **Multi-project by default** — one daemon, one TODO backlog per registered
+  repo, prioritized across all of them.
+- **Safe by construction** — git is the undo button (no repo without commit
+  history gets registered), and this repo ships with zero private data: see
+  below.
+
+## Quickstart
+
+```
+# 1. Add this repo as a plugin marketplace source, then install it, then:
+/squeezer:setup
+```
+
+That one command walks you through registering your projects, setting up
+the Telegram bot, and installing the background daemon as an OS service
+(launchd on macOS, systemd `--user` on Linux). It's idempotent — safe to
+re-run any time. Full step-by-step details are in [Setup](#setup) below.
+
+## No private data lives in this repo
 
 This repo is generic on purpose: **no private project names, paths, or
 secrets are committed**. Everything project-specific lives in your local
@@ -121,3 +153,10 @@ state lives.
 See `templates/ESCALATION_POLICY.md.template` (copied to
 `SQUEEZER_HOME/ESCALATION_POLICY.md` on setup) for what the agent handles
 autonomously vs. what it escalates to you over Telegram.
+
+## Contributing
+
+Issues and PRs welcome — especially reports of escalation-policy edge cases
+or daemon reliability bugs. If squeezer is saving you a rate-limit window's
+worth of babysitting, a star on the repo is the easiest way to help other
+Claude Code users find it.
