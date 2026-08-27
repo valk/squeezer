@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Builds squeezer's one-line HUD status — mode/budget/paused, TODO counts
-across registered projects, and a snippet of the most recent worklog entry.
+"""Builds squeezer's one-line HUD status — mode/paused, squeezer's own share
+of the 5-hour usage window, TODO counts across registered projects, and a
+snippet of the most recent worklog entry.
 The terminal analogue of the proactive Telegram summaries the daemon already
 sends: glanceable state without running the full `/squeezer:status` report.
 
@@ -30,14 +31,61 @@ import usage_lib  # noqa: E402
 _OPEN_RE = re.compile(r"^\s*-\s*\[ \]", re.MULTILINE)
 _BLOCKED_RE = re.compile(r"^\s*-\s*\[b\]", re.MULTILINE)
 
+# --- squeezer-specific usage bars (yellow/green "lemony" palette, distinct
+# from claude-hud's own Usage bar) ---
+_BAR_WIDTH = 5
+_ANSI_RESET = "\x1b[0m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-def _mode_fragment(mode: str, paused: bool, window_percent: float | None) -> str:
+
+def _mode_fragment(mode: str, paused: bool) -> str:
     fragment = mode
     if paused:
         fragment += "·paused"
-    if window_percent is not None:
-        fragment += f"·{window_percent:.0f}% window"
     return fragment
+
+
+def _bar(percent: float, color: str, width: int = _BAR_WIDTH) -> str:
+    """A claude-hud-style █░░░░ bar, colorized with an ANSI escape (color
+    doesn't count toward width elsewhere, see _visible_len/_truncate_visible
+    below). Rounds to the nearest segment (round-half-up) and clamps to
+    [0, 100] first so an out-of-range percent can't under/overfill it."""
+    clamped = min(max(percent, 0.0), 100.0)
+    filled = int(width * clamped / 100 + 0.5)
+    glyphs = "█" * filled + "░" * (width - filled)
+    return f"{color}{glyphs}{_ANSI_RESET}"
+
+
+def _squeezer_usage_fragments(of_used_percent: float, of_window_percent: float) -> list[str]:
+    return [
+        f"{_bar(of_used_percent, _ANSI_YELLOW)} {of_used_percent:.0f}% of used",
+        f"{_bar(of_window_percent, _ANSI_GREEN)} {of_window_percent:.1f}% of window",
+    ]
+
+
+def _visible_len(s: str) -> int:
+    return len(_ANSI_RE.sub("", s))
+
+
+def _truncate_visible(s: str, width: int) -> str:
+    """Truncate to `width` visible characters, preserving ANSI escape codes
+    verbatim (they don't count toward width) — plain slicing would either
+    cut an escape sequence in half or count its bytes against the budget."""
+    out = []
+    visible = 0
+    i = 0
+    while i < len(s) and visible < width:
+        m = _ANSI_RE.match(s, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+            continue
+        out.append(s[i])
+        visible += 1
+        i += 1
+    return "".join(out).rstrip()
 
 
 def _todo_fragment(open_count: int, blocked_count: int, project_count: int) -> str:
@@ -53,36 +101,47 @@ def build_status_line(
     *,
     mode: str,
     paused: bool,
-    window_percent: float | None,
+    squeezer_used_percent: float | None,
+    squeezer_window_percent: float | None,
     open_count: int,
     blocked_count: int,
     project_count: int,
     last_insight: str | None,
     width: int = 0,
 ) -> str:
-    """Pure assembly of the three ranked fragments (state -> TODOs ->
-    insight), truncated to `width` columns if given (0/falsy = no limit)."""
-    parts = [
-        _mode_fragment(mode, paused, window_percent),
-        _todo_fragment(open_count, blocked_count, project_count),
-    ]
+    """Pure assembly of the ranked fragments (state -> squeezer's usage bars
+    -> TODOs -> insight), truncated to `width` columns if given (0/falsy =
+    no limit). squeezer_used_percent/squeezer_window_percent both None omits
+    the usage bars entirely (uncalibrated window, same fail-open convention
+    as the rest of usage_lib) rather than showing them as zero."""
+    parts = [_mode_fragment(mode, paused)]
+    if squeezer_used_percent is not None and squeezer_window_percent is not None:
+        parts.extend(_squeezer_usage_fragments(squeezer_used_percent, squeezer_window_percent))
+    parts.append(_todo_fragment(open_count, blocked_count, project_count))
     if last_insight:
         parts.append(last_insight)
     line = "\U0001f34b " + " · ".join(parts)
-    if width and len(line) > width:
-        line = line[: max(0, width - 1)].rstrip() + "…"
+    if width and _visible_len(line) > width:
+        line = _truncate_visible(line, max(0, width - 1)) + _ANSI_RESET + "…"
     return line
 
 
-def _window_percent() -> float | None:
+def _squeezer_usage_percents() -> tuple[float, float] | None:
+    """(percent of this window's used tokens that were squeezer's own,
+    percent of the full window capacity squeezer has used) — None if the
+    window hasn't been calibrated yet (same fail-open convention as the
+    rest of usage_lib)."""
     state = usage_lib.load_state()
     if not state.get("calibrated"):
         return None
     transcript_path = usage_lib.find_known_transcript_path()
     if not transcript_path:
         return None
-    used = usage_lib.sum_usage_since(transcript_path, state["window_start_ts"])
-    return 100 * used / state["estimated_window_total"]
+    total_used = usage_lib.sum_usage_since(transcript_path, state["window_start_ts"])
+    squeezer_used = usage_lib.sum_squeezer_usage_since(state["window_start_ts"])
+    of_used = 100 * squeezer_used / total_used if total_used else 0.0
+    of_window = 100 * squeezer_used / state["estimated_window_total"]
+    return of_used, of_window
 
 
 def _todo_counts() -> tuple[int, int, int]:
@@ -138,10 +197,13 @@ def current_status_line(width: int = None) -> str:
     telegram_lib) actually uses."""
     cfg = _config.load_config()
     open_count, blocked_count, project_count = _todo_counts()
+    usage_percents = _squeezer_usage_percents()
+    squeezer_used_percent, squeezer_window_percent = usage_percents if usage_percents else (None, None)
     return build_status_line(
         mode=cfg.get("mode", "auto"),
         paused=(_config.state_dir() / "paused").exists(),
-        window_percent=_window_percent(),
+        squeezer_used_percent=squeezer_used_percent,
+        squeezer_window_percent=squeezer_window_percent,
         open_count=open_count,
         blocked_count=blocked_count,
         project_count=project_count,

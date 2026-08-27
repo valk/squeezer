@@ -250,8 +250,11 @@ def test_cmd_check_allows_when_no_transcript_path(window_state_path, monkeypatch
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
-def test_cmd_check_denies_when_reserve_breached(window_state_path, monkeypatch, capsys):
+def test_cmd_check_denies_when_reserve_breached_for_squeezer_cwd(window_state_path, monkeypatch, capsys, tmp_path):
+    """The reserve only gates squeezer's own daemon-spawned turns (cwd ==
+    squeezer_home(), see daemon.spawn_claude)."""
     import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     usage_lib.save_state({
         "window_start_ts": usage_lib.now_iso(),
         "estimated_window_total": 1000,
@@ -260,10 +263,111 @@ def test_cmd_check_denies_when_reserve_breached(window_state_path, monkeypatch, 
     })
     monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: 900)
     monkeypatch.setattr(usage_lib, "load_reserve_percent", lambda: 20)
-    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps({"transcript_path": "/fake/transcript.jsonl"})))
+    payload = {"transcript_path": "/fake/transcript.jsonl", "cwd": str(tmp_path)}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
     usage_lib.cmd_check()
     out = json.loads(capsys.readouterr().out)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_cmd_check_allows_reserve_breached_for_non_squeezer_cwd(window_state_path, monkeypatch, capsys, tmp_path):
+    """An interactive session or an agent working on some other project must
+    never be denied a tool call by squeezer's own budget — this is the
+    "budget guard blocks everyone" edge case being fixed."""
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+    })
+    monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: 900)
+    monkeypatch.setattr(usage_lib, "load_reserve_percent", lambda: 20)
+    payload = {"transcript_path": "/fake/transcript.jsonl", "cwd": str(tmp_path / "some-other-project")}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_is_squeezer_cwd_matches_squeezer_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    assert usage_lib._is_squeezer_cwd(str(tmp_path)) is True
+
+
+def test_is_squeezer_cwd_rejects_other_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    assert usage_lib._is_squeezer_cwd(str(tmp_path / "other")) is False
+
+
+def test_is_squeezer_cwd_handles_none():
+    assert usage_lib._is_squeezer_cwd(None) is False
+
+
+def test_cmd_check_tracks_squeezer_transcript_path(window_state_path, monkeypatch, capsys, tmp_path):
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    payload = {"transcript_path": "/fake/squeezer-session.jsonl", "cwd": str(tmp_path)}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    assert usage_lib.load_state()["squeezer_transcript_paths"] == ["/fake/squeezer-session.jsonl"]
+
+
+def test_cmd_check_does_not_track_non_squeezer_transcript_path(window_state_path, monkeypatch, capsys, tmp_path):
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    payload = {"transcript_path": "/fake/human-session.jsonl", "cwd": str(tmp_path / "elsewhere")}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    assert usage_lib.load_state().get("squeezer_transcript_paths", []) == []
+
+
+def test_cmd_check_dedupes_squeezer_transcript_path(window_state_path, monkeypatch, capsys, tmp_path):
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    payload = {"transcript_path": "/fake/squeezer-session.jsonl", "cwd": str(tmp_path)}
+    for _ in range(2):
+        monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+        usage_lib.cmd_check()
+    assert usage_lib.load_state()["squeezer_transcript_paths"] == ["/fake/squeezer-session.jsonl"]
+
+
+def test_sum_squeezer_usage_since_sums_across_tracked_transcripts(window_state_path, tmp_path):
+    now = datetime.now(timezone.utc)
+
+    def _entry(tokens):
+        return json.dumps({"timestamp": now.isoformat(), "message": {"usage": {"input_tokens": tokens}}})
+
+    t1 = tmp_path / "t1.jsonl"
+    t2 = tmp_path / "t2.jsonl"
+    t1.write_text(_entry(100) + "\n")
+    t2.write_text(_entry(50) + "\n")
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": False,
+        "squeezer_transcript_paths": [str(t1), str(t2)],
+    })
+    since = (now - timedelta(minutes=10)).isoformat()
+    assert usage_lib.sum_squeezer_usage_since(since) == 150
+
+
+def test_sum_squeezer_usage_since_empty_when_untracked(window_state_path):
+    assert usage_lib.sum_squeezer_usage_since(usage_lib.now_iso()) == 0
+
+
+def test_cmd_roll_window_resets_squeezer_transcript_paths(window_state_path, capsys):
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": False,
+        "squeezer_transcript_paths": ["/fake/old.jsonl"],
+    })
+    usage_lib.cmd_roll_window()
+    assert usage_lib.load_state()["squeezer_transcript_paths"] == []
 
 
 def test_parse_usage_output_with_minutes():

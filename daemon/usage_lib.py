@@ -71,6 +71,7 @@ def load_state():
         "estimated_window_total": DEFAULT_ESTIMATE,
         "past_window_totals": [],
         "calibrated": False,
+        "squeezer_transcript_paths": [],
     }
     save_state(state)
     return state
@@ -242,6 +243,15 @@ def sum_usage_since(transcript_path: str, since_ts: str) -> int:
     return total
 
 
+def sum_squeezer_usage_since(since_ts: str) -> int:
+    """Sum tokens across every transcript belonging to squeezer's own
+    daemon-spawned turns since since_ts (see cmd_check's squeezer_transcript_paths
+    tracking, keyed on cwd == squeezer_home()) — distinct from sum_usage_since's
+    single "last known" transcript, which could belong to any session."""
+    state = load_state()
+    return sum(sum_usage_since(p, since_ts) for p in state.get("squeezer_transcript_paths", []))
+
+
 def budget_ok(transcript_path: str = None) -> bool:
     """Whether the reserve is NOT yet breached for the current window — the
     same check cmd_check() enforces per tool call, exposed as a plain query
@@ -257,22 +267,49 @@ def budget_ok(transcript_path: str = None) -> bool:
     return used < threshold
 
 
-def cmd_check():
-    """Read a PreToolUse hook payload from stdin, block if the reserve is breached.
+def _is_squeezer_cwd(cwd: str | None) -> bool:
+    """Whether a PreToolUse payload's cwd belongs to squeezer's own
+    daemon-spawned turn — daemon.spawn_claude always runs `claude -p` with
+    cwd=squeezer_home() — as opposed to an interactive session or an agent
+    working on some other project."""
+    if not cwd:
+        return False
+    try:
+        return Path(cwd).resolve() == _config.squeezer_home().resolve()
+    except OSError:
+        return False
 
-    Also persists transcript_path to state as a side effect — this is the
-    shared source of truth other commands (calibrate, roll-window, the
-    daemon's pacing check) fall back to when they don't have one of their own.
+
+def cmd_check():
+    """Read a PreToolUse hook payload from stdin, block only if the payload
+    belongs to squeezer's own daemon-spawned turn AND the reserve is
+    breached. This hook is chained globally into every Claude Code session,
+    but the reserve exists to protect a human's own quota, not gate it — an
+    interactive session or an agent working on some other project must
+    never be denied a tool call by squeezer's own budget.
+
+    Also persists transcript_path to state as a side effect — last_known_
+    transcript_path is the shared source of truth other commands (calibrate,
+    roll-window, the daemon's coarse pacing check) fall back to when they
+    don't have one of their own, regardless of whose session it was. For
+    squeezer's own turns specifically, the transcript is additionally
+    appended to squeezer_transcript_paths, so hud_status.py can report
+    squeezer's own share of the window separately from the total.
     """
     payload = json.load(sys.stdin)
     transcript_path = payload.get("transcript_path")
+    is_squeezer_turn = _is_squeezer_cwd(payload.get("cwd"))
     state = load_state()
 
     if transcript_path:
         state["last_known_transcript_path"] = transcript_path
+        if is_squeezer_turn:
+            paths = state.setdefault("squeezer_transcript_paths", [])
+            if transcript_path not in paths:
+                paths.append(transcript_path)
         save_state(state)
 
-    if transcript_path and not budget_ok(transcript_path):
+    if is_squeezer_turn and transcript_path and not budget_ok(transcript_path):
         used = sum_usage_since(transcript_path, state["window_start_ts"])
         print(json.dumps({
             "hookSpecificOutput": {
@@ -424,6 +461,7 @@ def cmd_roll_window(final_transcript_path: str = None):
         if state["past_window_totals"]:
             state["estimated_window_total"] = int(sum(state["past_window_totals"]) / len(state["past_window_totals"]))
     state["window_start_ts"] = now_iso()
+    state["squeezer_transcript_paths"] = []
     save_state(state)
     print(f"window rolled: start={state['window_start_ts']} estimated_total={state['estimated_window_total']}")
 
