@@ -19,6 +19,7 @@ Pure computation (`build_status_line`) takes already-loaded state so it's
 unit-testable without mocking the filesystem; the I/O to gather that state is
 kept to thin helpers below it.
 """
+import json
 import os
 import re
 import sys
@@ -31,31 +32,34 @@ import usage_lib  # noqa: E402
 _OPEN_RE = re.compile(r"^\s*-\s*\[ \]", re.MULTILINE)
 _BLOCKED_RE = re.compile(r"^\s*-\s*\[b\]", re.MULTILINE)
 
-# --- squeezer-specific usage bars ("lemony" palette, distinct from
-# claude-hud's own Usage bar — except of_window, see _quota_color below) ---
-_BAR_WIDTH = 5
+# --- squeezer-specific usage bar ("lemony" palette, distinct from
+# claude-hud's own Usage bar) — a single bar spanning 0-100% of the 5-hour
+# rolling token window (labeled "the 5h window" to stay plain and avoid
+# colliding with claude-hud's own "Usage"/"Context" bars — claude-hud's
+# "Context" is the unrelated current-session context-window fill), made of
+# four zones left to right:
+#   1. squeezer's own usage (solid, yellow -> green as it nears its cap)
+#   2. squeezer's remaining headroom within its allowed max (dim yellow
+#      dots) — this zone's width shrinks as the human's direct usage eats
+#      into the shared reserve, per _squeezer_usage_percents
+#   3. the human's own direct usage (solid blue)
+#   4. whatever's left untouched by either (dim neutral dots)
+_CONTEXT_BAR_WIDTH = 20
 _ANSI_RESET = "\x1b[0m"
-_ANSI_YELLOW = "\x1b[33m"
-_ANSI_GREEN = "\x1b[32m"
-_ANSI_CYAN = "\x1b[36m"
-_ANSI_RED = "\x1b[31m"
+_ANSI_DIM_YELLOW = "\x1b[2;33m"
 _ANSI_BRIGHT_BLUE = "\x1b[94m"
-_ANSI_BRIGHT_MAGENTA = "\x1b[95m"
+_ANSI_DIM = "\x1b[2m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _quota_color(percent: float) -> str:
-    """Same three-tier color scheme claude-hud uses for its own "Usage" bar
-    (getQuotaColor in its render/colors.ts: bright-blue below 75%, bright-
-    magenta from 75%, red from 90%) — reused here for of_window so the two
-    plugins' bars read as the same visual signal, even though they measure
-    different things (claude-hud's is the account's real 5-hour window
-    usage; squeezer's is its own share of that window)."""
-    if percent >= 90:
-        return _ANSI_RED
-    if percent >= 75:
-        return _ANSI_BRIGHT_MAGENTA
-    return _ANSI_BRIGHT_BLUE
+def _squeeze_color(percent: float) -> str:
+    """Interpolates yellow -> green as squeezer approaches its allowed
+    maximum, walking the xterm 256-color cube's r=5..0,g=5,b=0 ramp (color
+    226, pure yellow, down to color 46, pure green) rather than a plain
+    16-color code, since a one-shot color swap wouldn't read as a gradient."""
+    clamped = min(max(percent, 0.0), 100.0)
+    r = round(5 * (1 - clamped / 100))
+    return f"\x1b[38;5;{46 + 36 * r}m"
 
 
 def _mode_fragment(mode: str, paused: bool) -> str:
@@ -65,28 +69,63 @@ def _mode_fragment(mode: str, paused: bool) -> str:
     return fragment
 
 
-def _bar(percent: float, color: str, width: int = _BAR_WIDTH) -> str:
-    """A claude-hud-style █░░░░ bar, colorized with an ANSI escape (color
-    doesn't count toward width elsewhere, see _visible_len/_truncate_visible
-    below). Rounds to the nearest segment (round-half-up) and clamps to
-    [0, 100] first so an out-of-range percent can't under/overfill it."""
-    clamped = min(max(percent, 0.0), 100.0)
-    filled = int(width * clamped / 100 + 0.5)
-    glyphs = "█" * filled + "░" * (width - filled)
-    return f"{color}{glyphs}{_ANSI_RESET}"
+def _allocate_chars(percentages: list[float], width: int) -> list[int]:
+    """Largest-remainder rounding: converts float percentages (assumed to
+    sum to ~100) into integer character counts that sum to exactly `width`.
+    Rounding each share independently (e.g. int(x + 0.5)) can drift the
+    total a character or two off `width`; this keeps every zone's width
+    proportional while guaranteeing the bar itself always renders exactly
+    `width` characters wide."""
+    raw = [max(p, 0.0) / 100 * width for p in percentages]
+    base = [int(x) for x in raw]
+    remainder = width - sum(base)
+    by_fraction = sorted(range(len(raw)), key=lambda i: raw[i] - base[i], reverse=True)
+    for i in by_fraction[:remainder]:
+        base[i] += 1
+    return base
+
+
+def _context_bar(
+    squeezer_window_percent: float,
+    human_window_percent: float,
+    of_budget_percent: float,
+    budget_of_window_percent: float,
+    width: int = _CONTEXT_BAR_WIDTH,
+) -> str:
+    """The four-zone bar described above. squeezer's solid zone is clamped
+    to its own allowed max (budget_of_window_percent) so an over-budget
+    of_budget_percent (>100%, see _squeezer_usage_percents) fills that zone
+    solid rather than overflowing into the human's zone."""
+    allowed = min(max(budget_of_window_percent, 0.0), 100.0)
+    squeezer_solid = min(max(squeezer_window_percent, 0.0), allowed)
+    squeezer_headroom = allowed - squeezer_solid
+    human_solid = min(max(human_window_percent, 0.0), 100.0 - allowed)
+    tail = max(0.0, 100.0 - allowed - human_solid)
+
+    a, b, c, d = _allocate_chars([squeezer_solid, squeezer_headroom, human_solid, tail], width)
+    return (
+        f"{_squeeze_color(of_budget_percent)}{'█' * a}{_ANSI_RESET}"
+        f"{_ANSI_DIM_YELLOW}{'░' * b}{_ANSI_RESET}"
+        f"{_ANSI_BRIGHT_BLUE}{'█' * c}{_ANSI_RESET}"
+        f"{_ANSI_DIM}{'░' * d}{_ANSI_RESET}"
+    )
 
 
 def _squeezer_usage_fragments(
-    of_used_percent: float,
-    of_window_percent: float,
+    squeezer_window_percent: float,
+    human_window_percent: float,
     of_budget_percent: float,
     budget_of_window_percent: float,
 ) -> list[str]:
+    bar = _context_bar(
+        squeezer_window_percent, human_window_percent,
+        of_budget_percent, budget_of_window_percent,
+    )
     return [
-        f"{_bar(of_used_percent, _ANSI_YELLOW)} {of_used_percent:.0f}% of used",
-        f"{_bar(of_window_percent, _quota_color(of_window_percent))} {of_window_percent:.1f}% of window",
-        f"{_bar(of_budget_percent, _ANSI_CYAN)} {of_budget_percent:.0f}% of allowed max",
-        f"allowed max {budget_of_window_percent:.0f}% of window",
+        f"{bar} squeezed: {of_budget_percent:.0f}%",
+        f"user: {human_window_percent:.0f}%",
+        f"max: {budget_of_window_percent:.0f}% of the 5h window",
+        f"total: {(squeezer_window_percent + human_window_percent):.0f}%",
     ]
 
 
@@ -119,15 +158,16 @@ def _todo_fragment(open_count: int, blocked_count: int, project_count: int) -> s
     fragment = f"{open_count} open"
     if blocked_count:
         fragment += f", {blocked_count} blocked"
-    return f"{fragment} ({project_count} proj)"
+    project_word = "project" if project_count == 1 else "projects"
+    return f"{fragment} ({project_count} {project_word})"
 
 
 def build_status_line(
     *,
     mode: str,
     paused: bool,
-    squeezer_used_percent: float | None,
     squeezer_window_percent: float | None,
+    human_window_percent: float | None,
     squeezer_budget_percent: float | None,
     squeezer_budget_of_window_percent: float | None,
     open_count: int,
@@ -136,41 +176,53 @@ def build_status_line(
     last_insight: str | None,
     width: int = 0,
 ) -> str:
-    """Pure assembly of the ranked fragments (state -> squeezer's usage bars
+    """Pure assembly of the ranked fragments (state -> squeezer's usage bar
     -> TODOs -> insight), truncated to `width` columns if given (0/falsy =
-    no limit). The four squeezer_* percents come as a set — all None omits
-    the usage bars entirely (uncalibrated window, same fail-open convention
-    as the rest of usage_lib) rather than showing them as zero:
-    - squeezer_used_percent ("of used"): squeezer's share of tokens used so
-      far this window (human + squeezer combined) — e.g. 7% of a 14%-used
-      window is 50% "of used". "Tokens used so far" here is the same
-      quantity as Claude Code's own "Usage" number (5-hour window spend),
-      approximated by summing transcripts — NOT "Context" (that's the
-      current session's context-window fill, an unrelated per-session
-      figure that resets on compaction).
-    - squeezer_window_percent ("of window"): squeezer's usage as a share of
-      the full window capacity (independent of how much of the window is
-      used so far) — the 7% itself in the example above.
-    - squeezer_budget_percent ("of allowed max"): squeezer's usage as a
-      share of its own *allowed maximum* this window — estimated_window_total
-      minus the configured reserve (0 reserve, i.e. 100% allowed, during
-      no_reserve_hours) — how close squeezer is to its own cap right now.
-    - squeezer_budget_of_window_percent ("allowed max of window"): how much
-      of the full window squeezer's allowed maximum itself represents (100%
-      minus the reserve percent) — varies with time of day via
-      no_reserve_hours."""
+    no limit). The four squeezer_*/human_* percents come as a set — either
+    all None (uncalibrated window, same fail-open convention as the rest of
+    usage_lib) or all set — omitting the usage bar entirely rather than
+    showing it as zero. All four are percentages of "the 5h window": the
+    5-hour rolling token window squeezer draws its budget from (labeled
+    plainly to avoid colliding with claude-hud's own "Usage"/"Context"
+    bars — claude-hud's "Usage" is the account's real combined figure (this
+    is squeezer's own accounting of the same window via transcript
+    summation) and its "Context" is the unrelated current session's
+    context-window fill, which resets on compaction). A None value
+    (uncalibrated window, same fail-open convention as the rest of
+    usage_lib — e.g. right after install, before squeezer has seen enough
+    transcript activity to estimate the window total) renders as 0 rather
+    than omitting the bar, so the HUD row is present immediately instead of
+    only appearing once real data exists:
+    - squeezer_window_percent: squeezer's own usage as a raw share of
+      the 5h window — the width of the bar's solid squeeze-colored zone.
+    - human_window_percent ("user: N%"): the human's own direct usage
+      (outside squeezer) as a raw share of the 5h window — the bar's solid
+      blue zone.
+    - squeezer_budget_percent ("squeezed: N%"): squeezer's usage as a share
+      of its own *allowed maximum* this window — how close squeezer is to
+      the point it actually gets blocked, per usage_lib.budget_ok, and what
+      colors the bar's solid zone along the yellow -> green gradient. Can
+      exceed 100% if the human's own direct usage grew (shrinking the
+      allowed maximum, see squeezer_budget_of_window_percent below) after
+      squeezer had already used tokens against a larger one.
+    - squeezer_budget_of_window_percent ("max: N% of the 5h window"):
+      squeezer's allowed maximum as a share of the 5h window — (100% minus
+      the configured reserve, 0 during no_reserve_hours) minus however much
+      of it the human has already used directly, i.e. where the bar's
+      squeeze zone (solid + dotted headroom) ends and the human's zone
+      begins. Mirrors usage_lib.budget_ok's own gate (total_used <
+      estimated_window_total * (1 - reserve%)) so squeezer_budget_percent
+      hitting 100% lines up with the point budget_ok actually blocks
+      squeezer, rather than measuring squeezer's usage against a reserve
+      that ignores the human's own direct usage. Never below 0 (clamped for
+      when the human alone has already crossed the threshold).
+    A fourth text fragment, "total: N%", is squeezer_window_percent +
+    human_window_percent — combined usage as a share of the 5h window."""
     parts = [_mode_fragment(mode, paused)]
-    if all(
-        p is not None
-        for p in (
-            squeezer_used_percent, squeezer_window_percent,
-            squeezer_budget_percent, squeezer_budget_of_window_percent,
-        )
-    ):
-        parts.extend(_squeezer_usage_fragments(
-            squeezer_used_percent, squeezer_window_percent,
-            squeezer_budget_percent, squeezer_budget_of_window_percent,
-        ))
+    parts.extend(_squeezer_usage_fragments(
+        squeezer_window_percent or 0.0, human_window_percent or 0.0,
+        squeezer_budget_percent or 0.0, squeezer_budget_of_window_percent or 0.0,
+    ))
     parts.append(_todo_fragment(open_count, blocked_count, project_count))
     if last_insight:
         parts.append(last_insight)
@@ -180,33 +232,105 @@ def build_status_line(
     return line
 
 
-def _squeezer_usage_percents() -> tuple[float, float, float, float] | None:
-    """(of_used, of_window, of_budget, budget_of_window) — see
+def _squeezer_usage_percents(
+    real_five_hour_percent: float | None = None,
+) -> tuple[float, float, float, float] | None:
+    """(squeezer_window, human_window, of_budget, budget_of_window) — see
     build_status_line's docstring for what each means — or None if the
     window hasn't been calibrated yet (same fail-open convention as the
     rest of usage_lib).
 
-    total_used comes from usage_lib.total_used_since, NOT
-    find_known_transcript_path()/last_known_transcript_path: that pointer is
-    overwritten by whichever session's PreToolUse hook fires last, including
-    squeezer's own daemon-spawned turns, so right after squeezer runs a turn
-    it stops meaning "total usage" and starts meaning "squeezer's own latest
-    turn" — collapsing of_used to ~100% (or, once squeezer_used sums
-    multiple daemon turns against that single narrow transcript, past
-    100%)."""
+    total_used/squeezer_used come from usage_lib.total_used_since /
+    sum_squeezer_usage_since, NOT find_known_transcript_path()/
+    last_known_transcript_path: that pointer is overwritten by whichever
+    session's PreToolUse hook fires last, including squeezer's own
+    daemon-spawned turns, so right after squeezer runs a turn it stops
+    meaning "total usage" and starts meaning "squeezer's own latest turn"
+    alone — see total_used_since's own docstring for the fuller history.
+
+    real_five_hour_percent: the account's real, server-reported 5-hour
+    usage percentage (Claude Code's own stdin rate_limits.five_hour.
+    used_percentage on a live statusLine render — see
+    _real_five_hour_percent_from_stdin) — the same number /usage and
+    claude-hud's own Usage bar show. squeezer's own estimated_window_total
+    is just a local approximation (self-calibrated periodically against a
+    /usage shell-out) and will naturally drift from that real figure. When
+    given, it replaces squeezer's estimate as the ground truth for the
+    total/"100%": squeezer's local transcript sums are used only to work
+    out squeezer's *fraction* of this window's activity, which splits the
+    real total into squeezer_window/human_window rather than each being
+    independently estimated — so total (squeezer_window + human_window)
+    always reconciles exactly to real_five_hour_percent, matching
+    claude-hud. Also opportunistically feeds it into
+    usage_lib.calibrate_window() so the actual budget gate self-corrects
+    on every render this cheaply, instead of only via the periodic
+    self_calibrate() timer (calibrate_window fails open — e.g. no known
+    transcript yet — same as everywhere else, in which case this render
+    just keeps the previously estimated_total). None (the default, and
+    what current_status_line's non-statusLine callers — /squeezer:status,
+    the Telegram header — always pass, since neither goes through Claude
+    Code's statusLine stdin pipe) keeps today's fully self-estimated
+    behavior unchanged.
+
+    Calls maybe_roll_window() first so a statusLine render can self-heal an
+    overdue window (e.g. left stale by a dead/missing daemon — see
+    usage_lib.cmd_check's own call to it) even before any tool call in this
+    session has fired the PreToolUse hook."""
+    usage_lib.maybe_roll_window()
     state = usage_lib.load_state()
     if not state.get("calibrated"):
         return None
     total_used = usage_lib.total_used_since(state)
     squeezer_used = usage_lib.sum_squeezer_usage_since(state["window_start_ts"])
+    human_used = total_used - squeezer_used
     estimated_total = state["estimated_window_total"]
-    allowed_max = estimated_total * (1 - usage_lib.load_reserve_percent() / 100)
+    reserve_percent = usage_lib.load_reserve_percent()
 
-    of_used = 100 * squeezer_used / total_used if total_used else 0.0
-    of_window = 100 * squeezer_used / estimated_total
-    of_budget = 100 * squeezer_used / allowed_max if allowed_max else 0.0
-    budget_of_window = 100 * allowed_max / estimated_total
-    return of_used, of_window, of_budget, budget_of_window
+    if real_five_hour_percent is not None:
+        calibration = usage_lib.calibrate_window(real_five_hour_percent)
+        if calibration.get("ok"):
+            estimated_total = calibration["estimated_window_total"]
+        fraction = squeezer_used / total_used if total_used else 0.0
+        squeezer_window = real_five_hour_percent * fraction
+        human_window = real_five_hour_percent - squeezer_window
+    else:
+        squeezer_window = 100 * squeezer_used / estimated_total
+        human_window = 100 * human_used / estimated_total
+
+    budget_of_window = max(0.0, (100 - reserve_percent) - human_window)
+    allowed_max = estimated_total * budget_of_window / 100
+    of_budget = 100 * squeezer_used / allowed_max if allowed_max else (100.0 if squeezer_used else 0.0)
+    return squeezer_window, human_window, of_budget, budget_of_window
+
+
+def _real_five_hour_percent_from_stdin() -> float | None:
+    """Parses Claude Code's own statusLine JSON payload for
+    rate_limits.five_hour.used_percentage — see _squeezer_usage_percents'
+    docstring for what this is and why it's used. install_statusline.py's
+    chain-wrapping (see its _wrap_command) gives every chained statusLine
+    command, squeezer's own included, a full independent copy of this
+    payload on stdin — without it, only the first command in a chained
+    multi-line statusLine command actually receives any bytes (verified:
+    the second of two sequential `cat`s in one shell invocation gets EOF
+    immediately, since a pipe can't be read twice).
+
+    None (fail open) if stdin is a live terminal (skip reading rather than
+    blocking on a human running this by hand with nothing piped in), empty
+    or unparseable (older Claude Code builds without rate_limits yet, or a
+    statusLine command someone hand-edited to not pipe anything), or the
+    field itself is missing or not a plain number."""
+    if sys.stdin.isatty():
+        return None
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = (payload.get("rate_limits") or {}).get("five_hour", {}).get("used_percentage")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return float(value)
 
 
 def _todo_counts() -> tuple[int, int, int]:
@@ -256,22 +380,27 @@ def _terminal_width() -> int:
         return 0
 
 
-def current_status_line(width: int = None) -> str:
+def current_status_line(width: int = None, real_five_hour_percent: float | None = None) -> str:
     """Gathers live state from SQUEEZER_HOME and assembles the line — the
     one entry point every caller (statusLine script, /squeezer:status,
-    telegram_lib) actually uses."""
+    telegram_lib) actually uses. real_five_hour_percent is only ever passed
+    by the statusLine __main__ entrypoint below (see
+    _real_five_hour_percent_from_stdin) — the other two callers don't go
+    through Claude Code's statusLine stdin pipe, so they leave it None and
+    get squeezer's own self-estimated numbers, same as before this
+    parameter existed."""
     cfg = _config.load_config()
     open_count, blocked_count, project_count = _todo_counts()
-    usage_percents = _squeezer_usage_percents()
+    usage_percents = _squeezer_usage_percents(real_five_hour_percent)
     (
-        squeezer_used_percent, squeezer_window_percent,
+        squeezer_window_percent, human_window_percent,
         squeezer_budget_percent, squeezer_budget_of_window_percent,
     ) = usage_percents if usage_percents else (None, None, None, None)
     return build_status_line(
         mode=cfg.get("mode", "auto"),
         paused=(_config.state_dir() / "paused").exists(),
-        squeezer_used_percent=squeezer_used_percent,
         squeezer_window_percent=squeezer_window_percent,
+        human_window_percent=human_window_percent,
         squeezer_budget_percent=squeezer_budget_percent,
         squeezer_budget_of_window_percent=squeezer_budget_of_window_percent,
         open_count=open_count,
@@ -284,6 +413,6 @@ def current_status_line(width: int = None) -> str:
 
 if __name__ == "__main__":
     try:
-        print(current_status_line())
+        print(current_status_line(real_five_hour_percent=_real_five_hour_percent_from_stdin()))
     except Exception as e:  # never break a statusLine render / message send
         print(f"\U0001f34b squeezer: status unavailable ({e})")
