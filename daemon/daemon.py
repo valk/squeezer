@@ -292,10 +292,7 @@ def _budget_cap_reached(hil_state: dict, window_state: dict) -> bool:
     cap = hil_state.get("budget_cap_percent")
     if not cap or hil_state.get("cap_window_start_ts") != window_state.get("window_start_ts"):
         return False
-    transcript_path = usage_lib.find_known_transcript_path()
-    if not transcript_path:
-        return False
-    used = usage_lib.sum_usage_since(transcript_path, window_state["window_start_ts"])
+    used = usage_lib.total_used_since(window_state)
     total = window_state.get("estimated_window_total") or usage_lib.DEFAULT_ESTIMATE
     return (used / total) * 100 >= cap
 

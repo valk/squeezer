@@ -358,6 +358,106 @@ def test_sum_squeezer_usage_since_empty_when_untracked(window_state_path):
     assert usage_lib.sum_squeezer_usage_since(usage_lib.now_iso()) == 0
 
 
+# --- last_known_human_transcript_path / total_used_since ---
+#
+# Regression coverage for the bug where hud_status's "of used" bar jumped
+# 0% -> 100% right after squeezer's first daemon-spawned turn, then climbed
+# past 100% (e.g. 270%) as squeezer ran more turns: the old code used the
+# single last_known_transcript_path (overwritten by *any* session's
+# PreToolUse hook, squeezer's own turns included) as the "total usage"
+# denominator, so once squeezer was the most recent turn, that denominator
+# collapsed to squeezer's own (single, narrow) transcript — same or smaller
+# than squeezer_used itself, which sums across *all* of squeezer's turns.
+
+def test_cmd_check_tracks_last_known_human_transcript_path_for_non_squeezer_turn(
+    window_state_path, monkeypatch, capsys, tmp_path
+):
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    payload = {"transcript_path": "/fake/human-session.jsonl", "cwd": str(tmp_path / "elsewhere")}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    assert usage_lib.load_state()["last_known_human_transcript_path"] == "/fake/human-session.jsonl"
+
+
+def test_cmd_check_does_not_clobber_human_transcript_with_a_squeezer_turn(
+    window_state_path, monkeypatch, capsys, tmp_path
+):
+    """A human session fires a tool call, then squeezer's own daemon-spawned
+    turn fires one right after — last_known_human_transcript_path must keep
+    pointing at the human session, not get overwritten by squeezer's."""
+    import io
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+
+    human_payload = {"transcript_path": "/fake/human-session.jsonl", "cwd": str(tmp_path / "elsewhere")}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(human_payload)))
+    usage_lib.cmd_check()
+
+    squeezer_payload = {"transcript_path": "/fake/squeezer-session.jsonl", "cwd": str(tmp_path)}
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(squeezer_payload)))
+    usage_lib.cmd_check()
+
+    state = usage_lib.load_state()
+    assert state["last_known_human_transcript_path"] == "/fake/human-session.jsonl"
+    # the generic (whoever-was-last) pointer is still allowed to move — only
+    # the human-specific one needs to stay put.
+    assert state["last_known_transcript_path"] == "/fake/squeezer-session.jsonl"
+
+
+def test_total_used_since_sums_human_and_squeezer_transcripts(window_state_path, tmp_path):
+    now = datetime.now(timezone.utc)
+
+    def _entry(tokens):
+        return json.dumps({"timestamp": now.isoformat(), "message": {"usage": {"input_tokens": tokens}}})
+
+    human = tmp_path / "human.jsonl"
+    squeezer1 = tmp_path / "squeezer1.jsonl"
+    squeezer2 = tmp_path / "squeezer2.jsonl"
+    human.write_text(_entry(1000) + "\n")
+    squeezer1.write_text(_entry(100) + "\n")
+    squeezer2.write_text(_entry(50) + "\n")
+
+    state = {
+        "window_start_ts": (now - timedelta(minutes=10)).isoformat(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": True,
+        "last_known_human_transcript_path": str(human),
+        "squeezer_transcript_paths": [str(squeezer1), str(squeezer2)],
+    }
+    assert usage_lib.total_used_since(state) == 1150
+
+
+def test_total_used_since_not_capped_by_a_single_squeezer_transcript(window_state_path, tmp_path):
+    """The bug: squeezer's own turns each get a fresh transcript file, and
+    squeezer_used sums across all of them (see sum_squeezer_usage_since) —
+    total_used_since must too, rather than tracking only whichever single
+    transcript a stale "last known" pointer happens to reference."""
+    now = datetime.now(timezone.utc)
+
+    def _entry(tokens):
+        return json.dumps({"timestamp": now.isoformat(), "message": {"usage": {"input_tokens": tokens}}})
+
+    human = tmp_path / "human.jsonl"
+    squeezer_turns = [tmp_path / f"squeezer{i}.jsonl" for i in range(3)]
+    human.write_text(_entry(100) + "\n")
+    for path in squeezer_turns:
+        path.write_text(_entry(90) + "\n")
+
+    state = {
+        "window_start_ts": (now - timedelta(minutes=10)).isoformat(),
+        "estimated_window_total": usage_lib.DEFAULT_ESTIMATE,
+        "past_window_totals": [],
+        "calibrated": True,
+        # simulates the old bug's stale generic pointer landing on just one
+        # squeezer turn — total_used_since must not be fooled by it.
+        "last_known_transcript_path": str(squeezer_turns[0]),
+        "last_known_human_transcript_path": str(human),
+        "squeezer_transcript_paths": [str(p) for p in squeezer_turns],
+    }
+    assert usage_lib.total_used_since(state) == 100 + 90 * 3
+
+
 def test_cmd_roll_window_resets_squeezer_transcript_paths(window_state_path, capsys):
     usage_lib.save_state({
         "window_start_ts": usage_lib.now_iso(),

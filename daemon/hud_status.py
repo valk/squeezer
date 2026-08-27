@@ -130,14 +130,20 @@ def _squeezer_usage_percents() -> tuple[float, float] | None:
     """(percent of this window's used tokens that were squeezer's own,
     percent of the full window capacity squeezer has used) — None if the
     window hasn't been calibrated yet (same fail-open convention as the
-    rest of usage_lib)."""
+    rest of usage_lib).
+
+    total_used comes from usage_lib.total_used_since, NOT
+    find_known_transcript_path()/last_known_transcript_path: that pointer is
+    overwritten by whichever session's PreToolUse hook fires last, including
+    squeezer's own daemon-spawned turns, so right after squeezer runs a turn
+    it stops meaning "total usage" and starts meaning "squeezer's own latest
+    turn" — collapsing of_used to ~100% (or, once squeezer_used sums
+    multiple daemon turns against that single narrow transcript, past
+    100%)."""
     state = usage_lib.load_state()
     if not state.get("calibrated"):
         return None
-    transcript_path = usage_lib.find_known_transcript_path()
-    if not transcript_path:
-        return None
-    total_used = usage_lib.sum_usage_since(transcript_path, state["window_start_ts"])
+    total_used = usage_lib.total_used_since(state)
     squeezer_used = usage_lib.sum_squeezer_usage_since(state["window_start_ts"])
     of_used = 100 * squeezer_used / total_used if total_used else 0.0
     of_window = 100 * squeezer_used / state["estimated_window_total"]

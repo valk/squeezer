@@ -252,17 +252,43 @@ def sum_squeezer_usage_since(since_ts: str) -> int:
     return sum(sum_usage_since(p, since_ts) for p in state.get("squeezer_transcript_paths", []))
 
 
+def total_used_since(state: dict) -> int:
+    """Total tokens used against the window budget since state["window_start_ts"],
+    combining the human's own session (last_known_human_transcript_path) with
+    every squeezer daemon-spawned turn (squeezer_transcript_paths).
+
+    Deliberately does NOT use last_known_transcript_path/find_known_transcript_path
+    for this: that pointer is overwritten by whichever session's PreToolUse hook
+    fires last, including squeezer's own daemon-spawned turns (see cmd_check).
+    Once squeezer runs a turn, "last known" stops meaning "total usage" and starts
+    meaning "squeezer's latest turn alone" — which previously made hud_status's
+    of_used bar (squeezer_used / that same narrow transcript) jump to ~100%, and
+    climb past 100% once squeezer_used summed multiple daemon turns against a
+    denominator that only ever reflected the single most recent one."""
+    since_ts = state["window_start_ts"]
+    human_path = state.get("last_known_human_transcript_path")
+    human_used = sum_usage_since(human_path, since_ts) if human_path else 0
+    squeezer_used = sum(sum_usage_since(p, since_ts) for p in state.get("squeezer_transcript_paths", []))
+    return human_used + squeezer_used
+
+
 def budget_ok(transcript_path: str = None) -> bool:
     """Whether the reserve is NOT yet breached for the current window — the
     same check cmd_check() enforces per tool call, exposed as a plain query
     for daemon.py's own pacing decision (spawn another turn at all?) rather
-    than a specific PreToolUse payload. Fails open (True) if there's no
-    transcript to evaluate yet or the estimate has never been calibrated."""
-    transcript_path = transcript_path or find_known_transcript_path()
+    than a specific PreToolUse payload. Fails open (True) if the estimate
+    has never been calibrated. With an explicit transcript_path (cmd_check's
+    live gate on the current squeezer turn), checks just that transcript;
+    otherwise checks total_used_since — human + every squeezer turn so far
+    this window — since daemon.py's pacing check has no single transcript
+    of its own to hand in."""
     state = load_state()
-    if not transcript_path or not state.get("calibrated"):
+    if not state.get("calibrated"):
         return True
-    used = sum_usage_since(transcript_path, state["window_start_ts"])
+    used = (
+        sum_usage_since(transcript_path, state["window_start_ts"])
+        if transcript_path else total_used_since(state)
+    )
     threshold = state["estimated_window_total"] * (1 - load_reserve_percent() / 100)
     return used < threshold
 
@@ -290,11 +316,15 @@ def cmd_check():
 
     Also persists transcript_path to state as a side effect — last_known_
     transcript_path is the shared source of truth other commands (calibrate,
-    roll-window, the daemon's coarse pacing check) fall back to when they
-    don't have one of their own, regardless of whose session it was. For
-    squeezer's own turns specifically, the transcript is additionally
-    appended to squeezer_transcript_paths, so hud_status.py can report
-    squeezer's own share of the window separately from the total.
+    roll-window) fall back to when they don't have one of their own,
+    regardless of whose session it was. For squeezer's own turns
+    specifically, the transcript is additionally appended to
+    squeezer_transcript_paths; for every other (human/other-project) turn,
+    it's also recorded as last_known_human_transcript_path — kept apart from
+    last_known_transcript_path so it can't be clobbered by squeezer's own
+    turns, since total_used_since() (hud_status's usage bars, and the
+    daemon's own budget pacing) needs a "total usage" pointer that survives
+    squeezer running its own turns.
     """
     payload = json.load(sys.stdin)
     transcript_path = payload.get("transcript_path")
@@ -307,6 +337,8 @@ def cmd_check():
             paths = state.setdefault("squeezer_transcript_paths", [])
             if transcript_path not in paths:
                 paths.append(transcript_path)
+        else:
+            state["last_known_human_transcript_path"] = transcript_path
         save_state(state)
 
     if is_squeezer_turn and transcript_path and not budget_ok(transcript_path):
@@ -330,9 +362,20 @@ def cmd_check():
 
 def find_known_transcript_path() -> str | None:
     """Best-known current transcript path, kept fresh by every PreToolUse
-    check."""
+    check — regardless of whose session it was. See find_known_human_
+    transcript_path for the variant that excludes squeezer's own turns."""
     state = load_state()
     return state.get("last_known_transcript_path")
+
+
+def find_known_human_transcript_path() -> str | None:
+    """Best-known transcript path for a non-squeezer (human or other-project)
+    session — unlike find_known_transcript_path, never overwritten by
+    squeezer's own daemon-spawned turns, so it stays a reliable stand-in for
+    "the human's own session total" even right after squeezer runs a turn.
+    See total_used_since()."""
+    state = load_state()
+    return state.get("last_known_human_transcript_path")
 
 
 def calibrate_window(real_percent: float, transcript_path: str = None) -> dict:

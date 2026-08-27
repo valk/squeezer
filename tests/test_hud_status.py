@@ -158,20 +158,22 @@ def test_current_status_line_reports_paused(tmp_path, monkeypatch):
 
 
 def _write_calibrated_state(tmp_path, total_used, squeezer_used, estimated_window_total=10000):
-    """Two separate scratch transcripts: one standing in for whatever
-    session last fired a tool call (total_used tokens), one standing in for
-    squeezer's own tracked daemon session (squeezer_used tokens) — modeling
-    the common case where the two differ (e.g. a human session fired the
-    most recent tool call)."""
+    """Two separate scratch transcripts: one standing in for the human's own
+    session, one for squeezer's own tracked daemon session (squeezer_used
+    tokens) — modeling the common case where the two differ. hud_status now
+    derives total_used as human + squeezer (see total_used_since), so the
+    human transcript here is seeded with the remainder (total_used minus
+    squeezer_used) rather than total_used itself, keeping this helper's
+    total_used param meaning "the window grand total" for callers."""
     now = datetime.now(timezone.utc)
     since = (now - timedelta(minutes=10)).isoformat()
 
     def _entry(tokens):
         return json.dumps({"timestamp": now.isoformat(), "message": {"usage": {"input_tokens": tokens}}})
 
-    total_transcript = tmp_path / "total.jsonl"
+    human_transcript = tmp_path / "human.jsonl"
     squeezer_transcript = tmp_path / "squeezer.jsonl"
-    total_transcript.write_text(_entry(total_used) + "\n")
+    human_transcript.write_text(_entry(total_used - squeezer_used) + "\n")
     squeezer_transcript.write_text(_entry(squeezer_used) + "\n")
 
     hud_status.usage_lib.save_state({
@@ -179,7 +181,7 @@ def _write_calibrated_state(tmp_path, total_used, squeezer_used, estimated_windo
         "estimated_window_total": estimated_window_total,
         "past_window_totals": [],
         "calibrated": True,
-        "last_known_transcript_path": str(total_transcript),
+        "last_known_human_transcript_path": str(human_transcript),
         "squeezer_transcript_paths": [str(squeezer_transcript)],
     })
 
@@ -204,6 +206,47 @@ def test_current_status_line_shows_zero_percent_bars_when_squeezer_has_not_run_y
     line = hud_status.current_status_line()
     assert "0% of used" in line
     assert "0.0% of window" in line
+
+
+def test_of_used_stays_bounded_across_multiple_squeezer_turns(tmp_path, monkeypatch):
+    """Regression for the bug where of_used jumped 0% -> 100% right after
+    squeezer's first daemon-spawned turn, then past 100% (e.g. 270%) as
+    squeezer ran more turns — caused by comparing squeezer_used (summed
+    across every squeezer transcript) against a "total" that was really
+    just whichever single transcript a stale last-known pointer landed on.
+    Three squeezer turns of 90 tokens each vs. one human turn of 100."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.delenv("COLUMNS", raising=False)
+    _write_config(tmp_path)
+
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(minutes=10)).isoformat()
+
+    def _entry(tokens):
+        return json.dumps({"timestamp": now.isoformat(), "message": {"usage": {"input_tokens": tokens}}})
+
+    human = tmp_path / "human.jsonl"
+    squeezer_turns = [tmp_path / f"squeezer{i}.jsonl" for i in range(3)]
+    human.write_text(_entry(100) + "\n")
+    for path in squeezer_turns:
+        path.write_text(_entry(90) + "\n")
+
+    hud_status.usage_lib.save_state({
+        "window_start_ts": since,
+        "estimated_window_total": 10000,
+        "past_window_totals": [],
+        "calibrated": True,
+        # the generic pointer landing on just the latest squeezer turn is
+        # exactly what previously broke this.
+        "last_known_transcript_path": str(squeezer_turns[-1]),
+        "last_known_human_transcript_path": str(human),
+        "squeezer_transcript_paths": [str(p) for p in squeezer_turns],
+    })
+
+    line = hud_status.current_status_line()
+    # squeezer_used=270, total=100+270=370 -> ~73%, never >= 100%.
+    assert "73% of used" in line
+    assert "100% of used" not in line
 
 
 def test_current_status_line_omits_usage_bars_when_uncalibrated(tmp_path, monkeypatch):
