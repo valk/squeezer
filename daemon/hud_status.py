@@ -32,13 +32,30 @@ _OPEN_RE = re.compile(r"^\s*-\s*\[ \]", re.MULTILINE)
 _BLOCKED_RE = re.compile(r"^\s*-\s*\[b\]", re.MULTILINE)
 
 # --- squeezer-specific usage bars ("lemony" palette, distinct from
-# claude-hud's own Usage bar) ---
+# claude-hud's own Usage bar — except of_window, see _quota_color below) ---
 _BAR_WIDTH = 5
 _ANSI_RESET = "\x1b[0m"
 _ANSI_YELLOW = "\x1b[33m"
 _ANSI_GREEN = "\x1b[32m"
 _ANSI_CYAN = "\x1b[36m"
+_ANSI_RED = "\x1b[31m"
+_ANSI_BRIGHT_BLUE = "\x1b[94m"
+_ANSI_BRIGHT_MAGENTA = "\x1b[95m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _quota_color(percent: float) -> str:
+    """Same three-tier color scheme claude-hud uses for its own "Usage" bar
+    (getQuotaColor in its render/colors.ts: bright-blue below 75%, bright-
+    magenta from 75%, red from 90%) — reused here for of_window so the two
+    plugins' bars read as the same visual signal, even though they measure
+    different things (claude-hud's is the account's real 5-hour window
+    usage; squeezer's is its own share of that window)."""
+    if percent >= 90:
+        return _ANSI_RED
+    if percent >= 75:
+        return _ANSI_BRIGHT_MAGENTA
+    return _ANSI_BRIGHT_BLUE
 
 
 def _mode_fragment(mode: str, paused: bool) -> str:
@@ -67,9 +84,9 @@ def _squeezer_usage_fragments(
 ) -> list[str]:
     return [
         f"{_bar(of_used_percent, _ANSI_YELLOW)} {of_used_percent:.0f}% of used",
-        f"{_bar(of_window_percent, _ANSI_GREEN)} {of_window_percent:.1f}% of window",
-        f"{_bar(of_budget_percent, _ANSI_CYAN)} {of_budget_percent:.0f}% of budget",
-        f"budget {budget_of_window_percent:.0f}% of window",
+        f"{_bar(of_window_percent, _quota_color(of_window_percent))} {of_window_percent:.1f}% of window",
+        f"{_bar(of_budget_percent, _ANSI_CYAN)} {of_budget_percent:.0f}% of allowed max",
+        f"allowed max {budget_of_window_percent:.0f}% of window",
     ]
 
 
@@ -124,19 +141,24 @@ def build_status_line(
     no limit). The four squeezer_* percents come as a set — all None omits
     the usage bars entirely (uncalibrated window, same fail-open convention
     as the rest of usage_lib) rather than showing them as zero:
-    - squeezer_used_percent: squeezer's share of tokens used so far this
-      window (human + squeezer combined) — e.g. 7% of a 14%-used window is
-      50% "of used".
-    - squeezer_window_percent: squeezer's usage as a share of the full
-      window capacity (independent of how much of the window is used so
-      far) — the 7% itself in the example above.
-    - squeezer_budget_percent: squeezer's usage as a share of its own
-      *allowed* budget this window (estimated_window_total minus the
-      configured reserve — 0 reserve, i.e. 100%, during no_reserve_hours) —
-      how close squeezer is to its own cap right now.
-    - squeezer_budget_of_window_percent: how much of the full window
-      squeezer's allowed budget itself represents (100% minus the reserve
-      percent) — varies with time of day via no_reserve_hours."""
+    - squeezer_used_percent ("of used"): squeezer's share of tokens used so
+      far this window (human + squeezer combined) — e.g. 7% of a 14%-used
+      window is 50% "of used". "Tokens used so far" here is the same
+      quantity as Claude Code's own "Usage" number (5-hour window spend),
+      approximated by summing transcripts — NOT "Context" (that's the
+      current session's context-window fill, an unrelated per-session
+      figure that resets on compaction).
+    - squeezer_window_percent ("of window"): squeezer's usage as a share of
+      the full window capacity (independent of how much of the window is
+      used so far) — the 7% itself in the example above.
+    - squeezer_budget_percent ("of allowed max"): squeezer's usage as a
+      share of its own *allowed maximum* this window — estimated_window_total
+      minus the configured reserve (0 reserve, i.e. 100% allowed, during
+      no_reserve_hours) — how close squeezer is to its own cap right now.
+    - squeezer_budget_of_window_percent ("allowed max of window"): how much
+      of the full window squeezer's allowed maximum itself represents (100%
+      minus the reserve percent) — varies with time of day via
+      no_reserve_hours."""
     parts = [_mode_fragment(mode, paused)]
     if all(
         p is not None

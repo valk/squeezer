@@ -38,8 +38,8 @@ def test_build_status_line_includes_all_ranked_fragments():
     assert "auto" in line
     assert "50% of used" in line
     assert "2.5% of window" in line
-    assert "30% of budget" in line
-    assert "budget 80% of window" in line
+    assert "30% of allowed max" in line
+    assert "allowed max 80% of window" in line
     assert "█" in line and "░" in line
     assert "5 open, 1 blocked (2 proj)" in line
     assert "fixed the flaky test" in line
@@ -64,7 +64,7 @@ def test_build_status_line_omits_usage_bars_when_uncalibrated():
     )
     assert "of used" not in line
     assert "of window" not in line
-    assert "of budget" not in line
+    assert "of allowed max" not in line
 
 
 def test_build_status_line_no_projects_registered():
@@ -130,6 +130,23 @@ def test_bar_clamps_out_of_range_percent():
     assert hud_status._bar(-10, hud_status._ANSI_YELLOW) == (
         f"{hud_status._ANSI_YELLOW}░░░░░{hud_status._ANSI_RESET}"
     )
+
+
+# --- _quota_color: mirrors claude-hud's own Usage-bar coloring ---
+
+def test_quota_color_below_75_is_bright_blue():
+    assert hud_status._quota_color(0) == hud_status._ANSI_BRIGHT_BLUE
+    assert hud_status._quota_color(74.9) == hud_status._ANSI_BRIGHT_BLUE
+
+
+def test_quota_color_from_75_is_bright_magenta():
+    assert hud_status._quota_color(75) == hud_status._ANSI_BRIGHT_MAGENTA
+    assert hud_status._quota_color(89.9) == hud_status._ANSI_BRIGHT_MAGENTA
+
+
+def test_quota_color_from_90_is_red():
+    assert hud_status._quota_color(90) == hud_status._ANSI_RED
+    assert hud_status._quota_color(150) == hud_status._ANSI_RED
 
 
 # --- current_status_line: real I/O against a scratch SQUEEZER_HOME ---
@@ -204,9 +221,9 @@ def test_current_status_line_shows_squeezer_usage_bars(tmp_path, monkeypatch):
     line = hud_status.current_status_line()
     assert "40% of used" in line
     assert "4.0% of window" in line
-    # budget = 10000 * 0.8 = 8000; 400/8000 = 5%
-    assert "5% of budget" in line
-    assert "budget 80% of window" in line
+    # allowed max = 10000 * 0.8 = 8000; 400/8000 = 5%
+    assert "5% of allowed max" in line
+    assert "allowed max 80% of window" in line
 
 
 def test_current_status_line_shows_zero_percent_bars_when_squeezer_has_not_run_yet(tmp_path, monkeypatch):
@@ -218,22 +235,22 @@ def test_current_status_line_shows_zero_percent_bars_when_squeezer_has_not_run_y
     line = hud_status.current_status_line()
     assert "0% of used" in line
     assert "0.0% of window" in line
-    assert "0% of budget" in line
-    assert "budget 80% of window" in line
+    assert "0% of allowed max" in line
+    assert "allowed max 80% of window" in line
 
 
 def test_current_status_line_of_budget_reflects_no_reserve_hours(tmp_path, monkeypatch):
     """During the configured no_reserve_hours window, load_reserve_percent()
-    returns 0 — squeezer's whole budget IS the window, e.g. at night."""
+    returns 0 — squeezer's allowed maximum IS the window, e.g. at night."""
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)
     _write_config(tmp_path, no_reserve_hours={"start": "00:00", "end": "23:59"})
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    # budget = 10000 * 1.0 = 10000; 400/10000 = 4%
-    assert "4% of budget" in line
-    assert "budget 100% of window" in line
+    # allowed max = 10000 * 1.0 = 10000; 400/10000 = 4%
+    assert "4% of allowed max" in line
+    assert "allowed max 100% of window" in line
 
 
 def test_of_used_stays_bounded_across_multiple_squeezer_turns(tmp_path, monkeypatch):
@@ -275,8 +292,8 @@ def test_of_used_stays_bounded_across_multiple_squeezer_turns(tmp_path, monkeypa
     # squeezer_used=270, total=100+270=370 -> ~73%, never >= 100%.
     assert "73% of used" in line
     assert "100% of used" not in line
-    # budget = 10000 * 0.8 = 8000; 270/8000 ~= 3.4%
-    assert "3% of budget" in line
+    # allowed max = 10000 * 0.8 = 8000; 270/8000 ~= 3.4%
+    assert "3% of allowed max" in line
 
 
 def test_current_status_line_omits_usage_bars_when_uncalibrated(tmp_path, monkeypatch):
@@ -288,7 +305,7 @@ def test_current_status_line_omits_usage_bars_when_uncalibrated(tmp_path, monkey
     line = hud_status.current_status_line()
     assert "of used" not in line
     assert "of window" not in line
-    assert "of budget" not in line
+    assert "of allowed max" not in line
 
 
 def test_current_status_line_includes_latest_worklog_insight(tmp_path, monkeypatch):
