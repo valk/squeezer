@@ -6,12 +6,16 @@
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-5A32A3)](https://github.com/valk/squeezer)
 [![GitHub stars](https://img.shields.io/github/stars/valk/squeezer?style=social)](https://github.com/valk/squeezer/stargazers)
 
-Claude Code's 5-hour usage window resets whether or not you're at your
-keyboard for it. squeezer is a background daemon that spends that time for
-you: it works through per-project TODO lists across your local git repos,
-texts you the results over Telegram, escalates only the genuinely in-doubt
-calls, and always keeps a configurable slice of the window free so you can
-grab manual control the moment something looks off. An optional
+Work around the clock to squeeze the latest drop of juice from Claude Code.
+Most of your 5-hour window goes idle once you step away — squeezer keeps
+working through it instead of letting that paid-for capacity sit unused. A
+background daemon that works through your project TODOs while you're away
+or rate-limited, texts you over Telegram, escalates only the in-doubt calls,
+and survives 5-hour usage resets automatically — with a fully autonomous
+mode so your nights stay yours.
+
+It always keeps a configurable slice of the window free so you can grab
+manual control the moment something looks off, and an optional
 human-in-loop mode hands control back to you at the start of every fresh
 window (or once a day) instead of running fully unattended.
 
