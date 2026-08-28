@@ -7,6 +7,7 @@ needs to keep that one process alive across crashes/reboots. Invoked by the
 `/squeezer:setup` command, not run directly during normal operation.
 """
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -107,6 +108,38 @@ def systemd_unit_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / "squeezer-daemon.service"
 
 
+def installed_daemon_script() -> Path | None:
+    """Daemon script path currently baked into the installed service config
+    (plist ProgramArguments / systemd ExecStart), or None if no service is
+    installed or its config can't be parsed. Lets a caller detect a plugin
+    update/reinstall that moved CLAUDE_PLUGIN_ROOT (e.g. a new marketplace
+    cache version) out from under an already-running (now stale) service —
+    see daemon/self_heal_wiring.py."""
+    system = platform.system()
+    if system == "Darwin":
+        path = launchd_plist_path()
+        if not path.exists():
+            return None
+        try:
+            with open(path, "rb") as f:
+                args = plistlib.load(f).get("ProgramArguments", [])
+        except Exception:
+            return None
+        return Path(args[1]) if len(args) > 1 else None
+
+    if system == "Linux":
+        path = systemd_unit_path()
+        if not path.exists():
+            return None
+        for line in path.read_text().splitlines():
+            if line.startswith("ExecStart="):
+                parts = line[len("ExecStart="):].split()
+                return Path(parts[1]) if len(parts) > 1 else None
+        return None
+
+    return None
+
+
 def install(python_bin: str = None, squeezer_home: Path = None) -> dict:
     """Writes and enables the appropriate service file for this OS. Returns
     {"ok": bool, "path": str} or {"ok": False, "error": str}."""
@@ -134,7 +167,11 @@ def install(python_bin: str = None, squeezer_home: Path = None) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(systemd_unit(python_bin, DAEMON_SCRIPT, claude_dir))
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
-        subprocess.run(["systemctl", "--user", "enable", "--now", path.stem + ".service"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "--user", "enable", path.stem + ".service"], check=True, capture_output=True)
+        # restart (not just "enable --now") so a re-install always picks up
+        # a changed unit file/daemon script even if the service was already
+        # running — "--now" alone is a no-op start when already active.
+        subprocess.run(["systemctl", "--user", "restart", path.stem + ".service"], check=True, capture_output=True)
         result = {"ok": True, "path": str(path)}
         if warning:
             result["warning"] = warning

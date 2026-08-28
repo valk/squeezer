@@ -97,6 +97,56 @@ def test_heal_rewires_statusline_when_missing(tmp_path, monkeypatch):
     ]
 
 
+def test_heal_restarts_daemon_service_when_stale(tmp_path, monkeypatch):
+    """Simulates a plugin update: the installed plist still points at an
+    old CLAUDE_PLUGIN_ROOT/daemon.py, but this session's own plugin_root is
+    different (e.g. a new marketplace cache version) — the daemon should be
+    reinstalled (which restarts it) to pick up the new code."""
+    squeezer_home = tmp_path / "squeezer_home"
+    squeezer_home.mkdir()
+    (squeezer_home / "config.json").write_text("{}")
+    plist_path = _mock_darwin(monkeypatch, tmp_path)
+    plist_path.parent.mkdir(parents=True)
+    plist_path.write_text(self_heal_wiring.install_service.launchd_plist(
+        "/usr/bin/python3", Path("/old/plugin/root/daemon/daemon.py"), tmp_path / "daemon.log",
+    ))
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({
+        "statusLine": {"type": "command", "command": "python3 /new/plugin/root/daemon/hud_status.py"},
+    }))
+
+    repaired = self_heal_wiring.heal(squeezer_home, "/new/plugin/root", settings_path)
+
+    assert repaired == ["daemon service (restarted for a plugin update)"]
+
+
+def test_heal_leaves_daemon_service_alone_when_plugin_root_matches(tmp_path, monkeypatch):
+    squeezer_home = tmp_path / "squeezer_home"
+    squeezer_home.mkdir()
+    (squeezer_home / "config.json").write_text("{}")
+    plist_path = _mock_darwin(monkeypatch, tmp_path)
+    plist_path.parent.mkdir(parents=True)
+    plist_path.write_text(self_heal_wiring.install_service.launchd_plist(
+        "/usr/bin/python3", Path("/plugin/root/daemon/daemon.py"), tmp_path / "daemon.log",
+    ))
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({
+        "statusLine": {"type": "command", "command": "python3 /plugin/root/daemon/hud_status.py"},
+    }))
+
+    repaired = self_heal_wiring.heal(squeezer_home, "/plugin/root", settings_path)
+
+    assert repaired == []
+
+
+def test_daemon_service_stale_false_when_unparseable(tmp_path, monkeypatch):
+    plist_path = _mock_darwin(monkeypatch, tmp_path)
+    plist_path.parent.mkdir(parents=True)
+    plist_path.write_text("not a plist")
+
+    assert self_heal_wiring.daemon_service_stale("/plugin/root") is False
+
+
 def test_heal_repairs_both_when_both_missing(tmp_path, monkeypatch):
     squeezer_home = tmp_path / "squeezer_home"
     squeezer_home.mkdir()

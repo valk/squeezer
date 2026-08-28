@@ -154,6 +154,61 @@ def test_install_linux_writes_unit_and_enables(tmp_path, monkeypatch):
     assert any("enable" in c for c in calls)
 
 
+def test_installed_daemon_script_darwin_reads_plist(tmp_path, monkeypatch):
+    plist_path = tmp_path / f"{install_service.LABEL}.plist"
+    plist_path.write_text(install_service.launchd_plist("/usr/bin/python3", Path("/opt/squeezer/daemon.py"), tmp_path / "x.log"))
+    monkeypatch.setattr(install_service, "launchd_plist_path", lambda: plist_path)
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Darwin")
+
+    assert install_service.installed_daemon_script() == Path("/opt/squeezer/daemon.py")
+
+
+def test_installed_daemon_script_darwin_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(install_service, "launchd_plist_path", lambda: tmp_path / "nope.plist")
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Darwin")
+
+    assert install_service.installed_daemon_script() is None
+
+
+def test_installed_daemon_script_darwin_none_when_unparseable(tmp_path, monkeypatch):
+    plist_path = tmp_path / f"{install_service.LABEL}.plist"
+    plist_path.write_text("not a plist")
+    monkeypatch.setattr(install_service, "launchd_plist_path", lambda: plist_path)
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Darwin")
+
+    assert install_service.installed_daemon_script() is None
+
+
+def test_installed_daemon_script_linux_reads_unit(tmp_path, monkeypatch):
+    unit_path = tmp_path / "squeezer-daemon.service"
+    unit_path.write_text(install_service.systemd_unit("/usr/bin/python3", Path("/opt/squeezer/daemon.py")))
+    monkeypatch.setattr(install_service, "systemd_unit_path", lambda: unit_path)
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Linux")
+
+    assert install_service.installed_daemon_script() == Path("/opt/squeezer/daemon.py")
+
+
+def test_installed_daemon_script_linux_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(install_service, "systemd_unit_path", lambda: tmp_path / "nope.service")
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Linux")
+
+    assert install_service.installed_daemon_script() is None
+
+
+def test_install_linux_restarts_even_when_already_active(tmp_path, monkeypatch):
+    unit_path = tmp_path / "systemd" / "user" / "squeezer-daemon.service"
+    monkeypatch.setattr(install_service, "systemd_unit_path", lambda: unit_path)
+    monkeypatch.setattr(install_service.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(install_service, "resolve_claude_dir", lambda: "/opt/claude/bin")
+
+    calls = []
+    monkeypatch.setattr(install_service.subprocess, "run", lambda cmd, **k: calls.append(cmd))
+
+    install_service.install(python_bin="/usr/bin/python3", squeezer_home=tmp_path)
+
+    assert any(c[:3] == ["systemctl", "--user", "restart"] for c in calls)
+
+
 def test_uninstall_macos_removes_plist(tmp_path, monkeypatch):
     plist_path = tmp_path / f"{install_service.LABEL}.plist"
     plist_path.write_text("dummy")
