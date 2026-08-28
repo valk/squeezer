@@ -67,6 +67,22 @@ def test_classify_ordinary_text_is_message():
     assert daemon_mod.classify_command("2, cap it at 40%") == daemon_mod.TelegramCommand.MESSAGE
 
 
+# --- compose_ack_message ---
+
+def test_compose_ack_message_busy():
+    msg = daemon_mod.compose_ack_message(busy=True)
+    assert "Got it" in msg
+
+
+def test_compose_ack_message_idle():
+    msg = daemon_mod.compose_ack_message(busy=False)
+    assert "Got it" in msg
+
+
+def test_compose_ack_message_busy_and_idle_differ():
+    assert daemon_mod.compose_ack_message(busy=True) != daemon_mod.compose_ack_message(busy=False)
+
+
 # --- open_todo_summaries ---
 
 def test_open_todo_summaries_collects_unchecked_items(tmp_path):

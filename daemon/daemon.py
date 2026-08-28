@@ -74,6 +74,17 @@ def build_claude_command(prompt: str, session_id: str | None, project_paths: lis
     return cmd
 
 
+def compose_ack_message(busy: bool) -> str:
+    """Instant Telegram reply sent the moment an ordinary message is queued —
+    before any claude -p turn runs. A queued message otherwise sits silent
+    until the (possibly very long, up to CLAUDE_SPAWN_TIMEOUT) current turn
+    finishes, which reads as a hang; this makes sure every message gets an
+    immediate response regardless of how busy the worker is."""
+    if busy:
+        return "Got it — still finishing up the current turn, I'll get to this right after."
+    return "Got it — starting on this now."
+
+
 def open_todo_summaries(todos_dir: Path, max_items: int = 5) -> list[str]:
     """Open (`- [ ]`) TODO lines across todos_dir/TODO.md and
     todos_dir/*/TODO.md — `- [b]` (blocked, awaiting a reply) is deliberately
@@ -174,7 +185,7 @@ def spawn_claude(prompt: str) -> dict:
 
 # --- worker: the only thread that ever spawns claude -p ---
 
-def worker_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event):
+def worker_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event, busy_event: threading.Event):
     last_signature = None
     no_progress_count = 0
     worklog_path = _config.state_dir() / "worklog.md"
@@ -185,8 +196,12 @@ def worker_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event):
         except queue.Empty:
             continue
 
-        log(f"spawning claude -p for: {prompt[:80]!r}")
-        result = spawn_claude(prompt)
+        busy_event.set()
+        try:
+            log(f"spawning claude -p for: {prompt[:80]!r}")
+            result = spawn_claude(prompt)
+        finally:
+            busy_event.clear()
         if not result["ok"]:
             log(f"claude -p failed: {result['error']}")
             continue
@@ -299,7 +314,7 @@ def _budget_cap_reached(hil_state: dict, window_state: dict) -> bool:
 
 # --- telegram: handles pause/resume/mode instantly, queues everything else ---
 
-def telegram_poll_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event):
+def telegram_poll_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event, busy_event: threading.Event):
     cfg = telegram_lib.TelegramConfig()
     log(f"telegram poll loop started, allowed chat_id={cfg.allowed_chat_id}")
     offset = 0
@@ -307,13 +322,15 @@ def telegram_poll_loop(work_queue: "queue.Queue[str]", stop_event: threading.Eve
         try:
             messages, offset = telegram_lib.get_updates(offset, cfg)
             for text in messages:
-                _handle_telegram_message(text, cfg, work_queue)
+                _handle_telegram_message(text, cfg, work_queue, busy_event)
         except Exception as e:  # noqa: BLE001 - keep polling regardless
             log(f"error during telegram poll (will retry): {e}")
             time_mod.sleep(5)
 
 
-def _handle_telegram_message(text: str, cfg: telegram_lib.TelegramConfig, work_queue: "queue.Queue[str]"):
+def _handle_telegram_message(
+    text: str, cfg: telegram_lib.TelegramConfig, work_queue: "queue.Queue[str]", busy_event: threading.Event
+):
     command = classify_command(text)
 
     if command == TelegramCommand.PAUSE:
@@ -355,6 +372,11 @@ def _handle_telegram_message(text: str, cfg: telegram_lib.TelegramConfig, work_q
             hil_state["cap_window_start_ts"] = usage_lib.load_state()["window_start_ts"]
         save_hil_state(hil_state)
 
+    try:
+        telegram_lib.send_message(compose_ack_message(busy_event.is_set()), cfg)
+    except Exception as e:  # noqa: BLE001 - a failed ack must not drop the message
+        log(f"could not send ack: {e}")
+
     log(f"queuing human message: {text!r}")
     work_queue.put(f"[Telegram/User]: {text}")
 
@@ -375,12 +397,13 @@ def main():
     _config.state_dir()  # ensure it exists
     work_queue: "queue.Queue[str]" = queue.Queue()
     stop_event = threading.Event()
+    busy_event = threading.Event()
 
     threads = [
-        threading.Thread(target=telegram_poll_loop, args=(work_queue, stop_event), daemon=True),
+        threading.Thread(target=telegram_poll_loop, args=(work_queue, stop_event, busy_event), daemon=True),
         threading.Thread(target=pacing_loop, args=(work_queue, stop_event), daemon=True),
         threading.Thread(target=self_calibrate_loop, args=(stop_event,), daemon=True),
-        threading.Thread(target=worker_loop, args=(work_queue, stop_event), daemon=True),
+        threading.Thread(target=worker_loop, args=(work_queue, stop_event, busy_event), daemon=True),
     ]
     for t in threads:
         t.start()
