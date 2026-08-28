@@ -427,8 +427,8 @@ def cmd_calibrate(real_percent: float, transcript_path: str = None):
 # the very quota it's reading. That makes it safe to poll on a timer instead
 # of relying on a human to relay numbers.
 _USAGE_LINE_RE = re.compile(
-    r"Current (session|week)[^:\n]*:\s*([\d.]+)%\s*used.*?"
-    r"resets\s+([A-Za-z]+\s+\d{1,2})\s+at\s+(\d{1,2}(?::\d{2})?\s*[ap]m)\s*\(([^)]+)\)",
+    r"Current (session|week)[^:\n]*:\s*([\d.]+)%\s*used"
+    r"(?:.*?resets\s+([A-Za-z]+\s+\d{1,2})\s+at\s+(\d{1,2}(?::\d{2})?\s*[ap]m)\s*\(([^)]+)\))?",
     re.IGNORECASE,
 )
 
@@ -436,13 +436,23 @@ _USAGE_LINE_RE = re.compile(
 def parse_usage_output(text: str, now: datetime = None) -> dict:
     """Parse `claude -p "/usage"` stdout into calibration-ready numbers:
     {"session_percent", "session_hours_until_reset", "week_percent",
-    "week_hours_until_reset"}. Raises ValueError if either line isn't found
-    (e.g. the CLI's /usage format changed) rather than calibrating on
-    garbage."""
+    "week_hours_until_reset"}. Raises ValueError if either percent line isn't
+    found (e.g. the CLI's /usage format changed) rather than calibrating on
+    garbage.
+
+    The "· resets ..." clause is optional per line: real /usage output omits
+    it for the session (5-hour) line when that line reads 0% used — a fresh
+    window has no reset time to report yet — so the matching
+    *_hours_until_reset key is simply absent from the result in that case
+    rather than the whole line failing to parse."""
     now = now or datetime.now(timezone.utc)
     result = {}
     for match in _USAGE_LINE_RE.finditer(text):
         kind, percent, month_day, time_str, tz_name = match.groups()
+        key = "session" if kind.lower() == "session" else "week"
+        result[f"{key}_percent"] = float(percent)
+        if month_day is None:
+            continue
         tz = ZoneInfo(tz_name)
         now_local = now.astimezone(tz)
         time_str = time_str.strip().lower().replace(" ", "")
@@ -452,10 +462,7 @@ def parse_usage_output(text: str, now: datetime = None) -> dict:
         ).replace(tzinfo=tz)
         if reset_local < now_local:
             reset_local = reset_local.replace(year=reset_local.year + 1)
-        hours_until = (reset_local.astimezone(timezone.utc) - now).total_seconds() / 3600
-        key = "session" if kind.lower() == "session" else "week"
-        result[f"{key}_percent"] = float(percent)
-        result[f"{key}_hours_until_reset"] = hours_until
+        result[f"{key}_hours_until_reset"] = (reset_local.astimezone(timezone.utc) - now).total_seconds() / 3600
 
     missing = {"session_percent", "week_percent"} - result.keys()
     if missing:
@@ -482,7 +489,14 @@ def self_calibrate(timeout: int = 60) -> dict:
         return {"ok": False, "error": str(e)}
 
     window_result = calibrate_window(parsed["session_percent"])
-    week_result = calibrate_weekly(parsed["week_percent"], parsed["week_hours_until_reset"])
+    if "week_hours_until_reset" in parsed:
+        week_result = calibrate_weekly(parsed["week_percent"], parsed["week_hours_until_reset"])
+    else:
+        # Same "0% used, no resets clause" case parse_usage_output tolerates
+        # for the session line — never actually seen for the week line, but
+        # guarded so a KeyError here can't break this function's own "never
+        # raises" contract.
+        week_result = {"ok": False, "error": "week line had no resets clause to calibrate against"}
 
     return {
         "ok": window_result["ok"] and week_result["ok"],

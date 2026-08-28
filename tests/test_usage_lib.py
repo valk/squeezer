@@ -622,6 +622,21 @@ def test_parse_usage_output_missing_line_raises():
         usage_lib.parse_usage_output("no usage information in this text at all")
 
 
+def test_parse_usage_output_session_at_zero_percent_omits_resets_clause():
+    # Real /usage output drops "· resets ..." for the session line when it's
+    # a fresh 5-hour window with 0% used (nothing to report a reset time
+    # for yet) — must still parse the percent instead of raising.
+    now = datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc)
+    text = (
+        "Current session: 0% used\n"
+        "Current week (all models): 36% used · resets Sep 1 at 7am (Asia/Jerusalem)\n"
+    )
+    result = usage_lib.parse_usage_output(text, now=now)
+    assert result["session_percent"] == 0.0
+    assert result["week_percent"] == 36.0
+    assert result.get("session_hours_until_reset") is None
+
+
 def test_calibrate_window_bad_percent(window_state_path):
     result = usage_lib.calibrate_window(150)
     assert result["ok"] is False
