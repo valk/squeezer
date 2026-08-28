@@ -390,17 +390,34 @@ def calibrate_window(real_percent: float, transcript_path: str = None) -> dict:
     """Non-exiting core of window calibration, shared by cmd_calibrate
     (human-relayed number) and self_calibrate (parsed from `claude -p
     "/usage"`) — returns {"ok": False, "error": ...} on bad input instead of
-    exiting, since self_calibrate runs unattended in a background thread."""
+    exiting, since self_calibrate runs unattended in a background thread.
+
+    real_percent is the account's whole 5-hour-window usage — it already
+    includes both the human's own session AND every squeezer daemon-spawned
+    turn this window, since both draw against the same real rate limit.
+    Without an explicit transcript_path (self_calibrate's and hud_status's
+    always-default case), "used" must therefore be total_used_since(state)
+    — combined across every known transcript — not just one session's sum:
+    treating a single transcript's tokens as if they were the entirety of
+    real_percent understates the true window capacity whenever the other
+    side also carries real usage this window (e.g. squeezer's own daemon
+    turns can easily outweigh the human's), which then inflates every
+    of_budget-style ratio computed against that estimate (see hud_status's
+    "squeezed" figure). An explicit transcript_path is a deliberate
+    caller-chosen override (e.g. cmd_calibrate tied to one specific
+    transcript) and keeps the old single-transcript behavior."""
     if not (0 < real_percent <= 100):
         return {"ok": False, "error": "real_percent must be between 0 and 100"}
 
-    transcript_path = transcript_path or find_known_transcript_path()
-    if not transcript_path:
-        return {"ok": False, "error": "no transcript_path given, and none known yet (no PreToolUse "
-                "hook has fired this window) — run a tool call first, then retry"}
-
     state = load_state()
-    used = sum_usage_since(transcript_path, state["window_start_ts"])
+    if transcript_path:
+        used = sum_usage_since(transcript_path, state["window_start_ts"])
+    else:
+        if not find_known_transcript_path():
+            return {"ok": False, "error": "no transcript_path given, and none known yet (no PreToolUse "
+                    "hook has fired this window) — run a tool call first, then retry"}
+        used = total_used_since(state)
+
     state["estimated_window_total"] = int(used / (real_percent / 100))
     state["calibrated"] = True
     save_state(state)

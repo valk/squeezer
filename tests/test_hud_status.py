@@ -553,8 +553,11 @@ def test_current_status_line_recalibrates_estimated_window_total_from_real_perce
 
     hud_status.current_status_line(real_five_hour_percent=40.0)
 
-    # squeezer's own transcript has 400 tokens = 40% real -> estimated total = 400/0.40 = 1000
-    assert hud_status.usage_lib.load_state()["estimated_window_total"] == 1000
+    # real_five_hour_percent covers the WHOLE account, not just one
+    # transcript, so calibration must use the combined total (600 human +
+    # 400 squeezer = 1000) = 40% real -> estimated total = 1000/0.40 = 2500,
+    # not squeezer's own 400 tokens alone (which would understate it).
+    assert hud_status.usage_lib.load_state()["estimated_window_total"] == 2500
 
 
 def test_last_insight_truncates_long_lines(tmp_path, monkeypatch):

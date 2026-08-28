@@ -648,6 +648,45 @@ def test_calibrate_window_no_transcript(window_state_path, monkeypatch):
     assert result["ok"] is False
 
 
+def test_calibrate_window_without_explicit_path_uses_combined_usage(window_state_path, monkeypatch):
+    # real_percent is the account's whole 5h-window usage, which includes
+    # BOTH squeezer's own daemon-spawned turns and the human's own session —
+    # calibrating off only one of those transcripts (as if it were the
+    # entire real_percent) understates the true window capacity whenever
+    # the other transcript also carries real usage this window.
+    state = usage_lib.load_state()
+    state["last_known_transcript_path"] = "/fake/human.jsonl"
+    state["last_known_human_transcript_path"] = "/fake/human.jsonl"
+    state["squeezer_transcript_paths"] = ["/fake/squeezer.jsonl"]
+    usage_lib.save_state(state)
+
+    fake_usage = {"/fake/human.jsonl": 100000, "/fake/squeezer.jsonl": 200000}
+    monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: fake_usage[path])
+
+    result = usage_lib.calibrate_window(30)
+
+    assert result["ok"] is True
+    assert result["used"] == 300000
+    assert result["estimated_window_total"] == int(300000 / 0.30)
+
+
+def test_calibrate_window_explicit_path_still_uses_just_that_transcript(window_state_path, monkeypatch):
+    # An explicit transcript_path (human-relayed cmd_calibrate tied to a
+    # specific transcript) is a deliberate override — must NOT be widened
+    # to combined usage.
+    state = usage_lib.load_state()
+    state["squeezer_transcript_paths"] = ["/fake/squeezer.jsonl"]
+    usage_lib.save_state(state)
+
+    fake_usage = {"/fake/human.jsonl": 100000, "/fake/squeezer.jsonl": 200000}
+    monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: fake_usage[path])
+
+    result = usage_lib.calibrate_window(30, transcript_path="/fake/human.jsonl")
+
+    assert result["ok"] is True
+    assert result["used"] == 100000
+
+
 def test_cmd_calibrate_still_exits_on_bad_percent(window_state_path):
     with pytest.raises(SystemExit):
         usage_lib.cmd_calibrate(150)
@@ -660,8 +699,11 @@ _SELF_CALIBRATE_STDOUT = (
 
 
 def test_self_calibrate_success(monkeypatch, window_state_path, weekly_state_path):
+    state = usage_lib.load_state()
+    state["last_known_transcript_path"] = "/fake/transcript.jsonl"
+    state["last_known_human_transcript_path"] = "/fake/transcript.jsonl"
+    usage_lib.save_state(state)
     monkeypatch.setattr(usage_lib.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(_SELF_CALIBRATE_STDOUT))
-    monkeypatch.setattr(usage_lib, "find_known_transcript_path", lambda: "/fake/transcript.jsonl")
     monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: 300000)
 
     result = usage_lib.self_calibrate()
