@@ -344,6 +344,24 @@ def test_current_status_line_allowed_max_never_goes_below_zero(tmp_path, monkeyp
     assert "total: 90%" in line
 
 
+def test_current_status_line_squeezed_percent_clamped_to_100(tmp_path, monkeypatch):
+    """If the human's own direct usage grows mid-window and shrinks squeezer's
+    allowed maximum after squeezer already spent tokens against a larger one,
+    the raw ratio (squeezer_used / allowed_max) can run over 100% — displayed
+    "squeezed: N%" must clamp to 100 rather than showing e.g. "108%", since a
+    percentage reading over 100 looks like a bug rather than "over budget"."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.delenv("COLUMNS", raising=False)
+    _write_config(tmp_path)  # reserve_percent defaults to 20
+    # human used 1000 (10%); allowed max = (100-20)-10 = 70% = 7000 tokens.
+    # squeezer used 7560 -> raw of_budget = 7560/7000 = 108%, clamped to 100%.
+    _write_calibrated_state(tmp_path, total_used=8560, squeezer_used=7560, estimated_window_total=10000)
+
+    line = hud_status.current_status_line()
+    assert "squeezed: 100%" in line
+    assert "max: 70% of the 5h window" in line
+
+
 def test_budget_percent_correctly_sums_multiple_squeezer_turns(tmp_path, monkeypatch):
     """Regression for the bug where a prior version of this metric compared
     squeezer_used (summed across every squeezer transcript) against a

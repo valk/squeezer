@@ -213,10 +213,15 @@ def build_status_line(
     - squeezer_budget_percent ("squeezed: N%"): squeezer's usage as a share
       of its own *allowed maximum* this window — how close squeezer is to
       the point it actually gets blocked, per usage_lib.budget_ok, and what
-      colors the bar's solid zone along the yellow -> green gradient. Can
-      exceed 100% if the human's own direct usage grew (shrinking the
-      allowed maximum, see squeezer_budget_of_window_percent below) after
-      squeezer had already used tokens against a larger one.
+      colors the bar's solid zone along the yellow -> green gradient.
+      Clamped to [0, 100] for display — the raw ratio can run over 100% if
+      the human's own direct usage grew (shrinking the allowed maximum, see
+      squeezer_budget_of_window_percent below) after squeezer had already
+      used tokens against a larger one, but since this is recomputed fresh
+      against the *current* allowed maximum on every call, "over budget"
+      always means "over squeezer's current allowance right now," not a
+      stale reading — worth capping at 100 so it still reads as a plain
+      percentage.
     - squeezer_budget_of_window_percent ("max: N% of the 5h window"):
       squeezer's allowed maximum as a share of the 5h window — (100% minus
       the configured reserve, 0 during no_reserve_hours) minus however much
@@ -321,6 +326,14 @@ def _squeezer_usage_percents(
     budget_of_window = max(0.0, (100 - reserve_percent) - human_window)
     allowed_max = estimated_total * budget_of_window / 100
     of_budget = 100 * squeezer_used / allowed_max if allowed_max else (100.0 if squeezer_used else 0.0)
+    # Clamped to 100 for display: of_budget is recomputed fresh from the *current*
+    # allowed_max on every call (this function is never memoized), so if the human's
+    # own direct usage grows and shrinks allowed_max after squeezer already spent
+    # tokens against a larger one, the next render already reflects that smaller
+    # allowed_max — "108%" would just mean squeezer is over its current allowance,
+    # not that it's stale. Still worth capping the *displayed* number at 100 so it
+    # reads as a plain percentage rather than needing this footnote every time.
+    of_budget = min(of_budget, 100.0)
     return squeezer_window, human_window, of_budget, budget_of_window
 
 
