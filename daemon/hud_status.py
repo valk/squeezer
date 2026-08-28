@@ -91,11 +91,18 @@ def _context_bar(
     of_budget_percent: float,
     budget_of_window_percent: float,
     width: int = _CONTEXT_BAR_WIDTH,
+    color: bool = True,
 ) -> str:
     """The four-zone bar described above. squeezer's solid zone is clamped
     to its own allowed max (budget_of_window_percent) so an over-budget
     of_budget_percent (>100%, see _squeezer_usage_percents) fills that zone
-    solid rather than overflowing into the human's zone."""
+    solid rather than overflowing into the human's zone.
+
+    color=False (used for Telegram, which renders plain text and mangles
+    raw ANSI escapes into literal garbage rather than interpreting them)
+    drops the escape codes entirely and instead tells the four zones apart
+    by glyph: the block-element shades (full/dark/medium/light) already
+    read as a solid-to-empty gradient without needing color."""
     allowed = min(max(budget_of_window_percent, 0.0), 100.0)
     squeezer_solid = min(max(squeezer_window_percent, 0.0), allowed)
     squeezer_headroom = allowed - squeezer_solid
@@ -103,6 +110,8 @@ def _context_bar(
     tail = max(0.0, 100.0 - allowed - human_solid)
 
     a, b, c, d = _allocate_chars([squeezer_solid, squeezer_headroom, human_solid, tail], width)
+    if not color:
+        return f"{'█' * a}{'▒' * b}{'▓' * c}{'░' * d}"
     return (
         f"{_squeeze_color(of_budget_percent)}{'█' * a}{_ANSI_RESET}"
         f"{_ANSI_DIM_YELLOW}{'░' * b}{_ANSI_RESET}"
@@ -116,10 +125,12 @@ def _squeezer_usage_fragments(
     human_window_percent: float,
     of_budget_percent: float,
     budget_of_window_percent: float,
+    color: bool = True,
 ) -> list[str]:
     bar = _context_bar(
         squeezer_window_percent, human_window_percent,
         of_budget_percent, budget_of_window_percent,
+        color=color,
     )
     return [
         f"{bar} squeezed: {of_budget_percent:.0f}%",
@@ -175,6 +186,7 @@ def build_status_line(
     project_count: int,
     last_insight: str | None,
     width: int = 0,
+    color: bool = True,
 ) -> str:
     """Pure assembly of the ranked fragments (state -> squeezer's usage bar
     -> TODOs -> insight), truncated to `width` columns if given (0/falsy =
@@ -217,18 +229,27 @@ def build_status_line(
       that ignores the human's own direct usage. Never below 0 (clamped for
       when the human alone has already crossed the threshold).
     A fourth text fragment, "total: N%", is squeezer_window_percent +
-    human_window_percent — combined usage as a share of the 5h window."""
+    human_window_percent — combined usage as a share of the 5h window.
+
+    color=False renders the bar with plain glyphs instead of ANSI escapes
+    (see _context_bar) — used for the Telegram header, since Telegram's
+    plain-text messages don't interpret ANSI and would show the raw escape
+    codes as garbage instead of a colored bar."""
     parts = [_mode_fragment(mode, paused)]
     parts.extend(_squeezer_usage_fragments(
         squeezer_window_percent or 0.0, human_window_percent or 0.0,
         squeezer_budget_percent or 0.0, squeezer_budget_of_window_percent or 0.0,
+        color=color,
     ))
     parts.append(_todo_fragment(open_count, blocked_count, project_count))
     if last_insight:
         parts.append(last_insight)
     line = "\U0001f34b " + " · ".join(parts)
     if width and _visible_len(line) > width:
-        line = _truncate_visible(line, max(0, width - 1)) + _ANSI_RESET + "…"
+        line = _truncate_visible(line, max(0, width - 1))
+        if color:
+            line += _ANSI_RESET
+        line += "…"
     return line
 
 
@@ -380,7 +401,9 @@ def _terminal_width() -> int:
         return 0
 
 
-def current_status_line(width: int = None, real_five_hour_percent: float | None = None) -> str:
+def current_status_line(
+    width: int = None, real_five_hour_percent: float | None = None, color: bool = True,
+) -> str:
     """Gathers live state from SQUEEZER_HOME and assembles the line — the
     one entry point every caller (statusLine script, /squeezer:status,
     telegram_lib) actually uses. real_five_hour_percent is only ever passed
@@ -388,7 +411,8 @@ def current_status_line(width: int = None, real_five_hour_percent: float | None 
     _real_five_hour_percent_from_stdin) — the other two callers don't go
     through Claude Code's statusLine stdin pipe, so they leave it None and
     get squeezer's own self-estimated numbers, same as before this
-    parameter existed."""
+    parameter existed. color=False is passed by telegram_lib — see
+    build_status_line's docstring."""
     cfg = _config.load_config()
     open_count, blocked_count, project_count = _todo_counts()
     usage_percents = _squeezer_usage_percents(real_five_hour_percent)
@@ -408,6 +432,7 @@ def current_status_line(width: int = None, real_five_hour_percent: float | None 
         project_count=project_count,
         last_insight=_last_insight(),
         width=_terminal_width() if width is None else width,
+        color=color,
     )
 
 

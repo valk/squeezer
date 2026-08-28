@@ -112,7 +112,7 @@ def _sent_text(captured):
 
 def test_send_message_prepends_hud_status_line_by_default(monkeypatch):
     captured = _sent_request(monkeypatch)
-    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda: "🍋 hud line")
+    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
 
     telegram_lib.send_message("hello", _cfg())
 
@@ -121,9 +121,25 @@ def test_send_message_prepends_hud_status_line_by_default(monkeypatch):
     assert text.endswith("hello")
 
 
+def test_send_message_requests_plain_bar_since_telegram_cant_render_ansi(monkeypatch):
+    """Telegram sends plain text and mangles raw ANSI escapes into literal
+    garbage rather than interpreting them, so the HUD header must be built
+    with color=False."""
+    captured = _sent_request(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        telegram_lib.hud_status, "current_status_line",
+        lambda **kw: calls.append(kw) or "🍋 hud line",
+    )
+
+    telegram_lib.send_message("hello", _cfg())
+
+    assert calls == [{"color": False}]
+
+
 def test_send_message_include_hud_false_skips_header(monkeypatch):
     captured = _sent_request(monkeypatch)
-    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda: "🍋 hud line")
+    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
 
     telegram_lib.send_message("hello", _cfg(), include_hud=False)
 
@@ -133,7 +149,7 @@ def test_send_message_include_hud_false_skips_header(monkeypatch):
 def test_send_message_falls_back_to_plain_text_if_hud_status_errors(monkeypatch):
     captured = _sent_request(monkeypatch)
 
-    def boom():
+    def boom(**kw):
         raise RuntimeError("broken state file")
 
     monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", boom)

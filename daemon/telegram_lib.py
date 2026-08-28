@@ -34,11 +34,13 @@ def send_message(text: str, cfg: TelegramConfig = None, timeout: int = 10, inclu
     """`include_hud` prepends the one-line HUD status (mode/budget, TODO
     counts, latest worklog snippet — see hud_status.py) as a header, so every
     message doubles as a status glance. Never lets a HUD-building bug break
-    message delivery: falls back to the plain message on any error."""
+    message delivery: falls back to the plain message on any error.
+    color=False since Telegram renders plain text and would show raw ANSI
+    escape codes as garbage rather than a colored bar."""
     cfg = cfg or TelegramConfig()
     if include_hud:
         try:
-            text = f"{hud_status.current_status_line()}\n\n{text}"
+            text = f"{hud_status.current_status_line(color=False)}\n\n{text}"
         except Exception:
             pass
     data = urllib.parse.urlencode({"chat_id": cfg.allowed_chat_id, "text": text}).encode()

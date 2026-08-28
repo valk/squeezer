@@ -137,6 +137,49 @@ def test_context_bar_renders_at_exact_width():
     assert hud_status._visible_len(bar) == 20
 
 
+def test_context_bar_color_false_has_no_ansi_escapes():
+    """Telegram renders plain text and mangles raw ANSI escapes into
+    literal garbage rather than interpreting them (the bug this guards
+    against), so color=False must emit none."""
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20, color=False)
+    assert "\x1b" not in bar
+    assert hud_status._visible_len(bar) == 20
+
+
+def test_context_bar_color_false_still_distinguishes_all_four_zones():
+    """Without color, the four zones must stay visually distinct by glyph
+    alone, or the bar collapses into an ambiguous wall of blocks."""
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20, color=False)
+    assert len(set(bar)) == 4
+
+
+def test_build_status_line_color_false_has_no_ansi_escapes():
+    line = hud_status.build_status_line(
+        mode="auto", paused=False,
+        squeezer_window_percent=10.0, human_window_percent=6.0,
+        squeezer_budget_percent=30.0, squeezer_budget_of_window_percent=80.0,
+        open_count=5, blocked_count=1, project_count=2,
+        last_insight="fixed the flaky test",
+        color=False,
+    )
+    assert "\x1b" not in line
+    assert "squeezed: 30%" in line
+
+
+def test_build_status_line_color_false_truncates_without_trailing_escape():
+    line = hud_status.build_status_line(
+        mode="auto", paused=False,
+        squeezer_window_percent=70.0, human_window_percent=5.0,
+        squeezer_budget_percent=95.0, squeezer_budget_of_window_percent=80.0,
+        open_count=5, blocked_count=1, project_count=2,
+        last_insight="a very long worklog snippet that should get cut off",
+        width=30, color=False,
+    )
+    assert "\x1b" not in line
+    assert len(line) <= 30
+    assert line.endswith("…")
+
+
 def test_context_bar_zone_widths_match_percentages():
     bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20)
     assert _bar_zone_widths(bar) == [2, 14, 1, 3]
