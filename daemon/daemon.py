@@ -39,6 +39,7 @@ import usage_lib  # noqa: E402
 
 PACING_INTERVAL = 30  # seconds between pacing ticks
 SELF_CALIBRATE_INTERVAL = 20 * 60  # seconds, matches the old orchestrator's default
+PAUSED_RECHECK_INTERVAL = 5 * 60  # seconds between checks for new todos/ content while loop-breaker-paused
 NO_PROGRESS_LIMIT = 3  # consecutive stalled continuation turns before we pause and alert
 CONTINUE_PROMPT = "Proceed to the next highest-priority item per todos/TODO.md."
 CLAUDE_SPAWN_TIMEOUT = 60 * 60 * 4  # generous — a real turn can run long
@@ -117,6 +118,43 @@ def progress_signature(worklog_path: Path, todos_dir: Path) -> str:
         if path.exists():
             h.update(path.read_bytes())
     return h.hexdigest()
+
+
+def todos_signature(todos_dir: Path) -> str:
+    """Cheap fingerprint of every TODO.md's content only — deliberately
+    excludes worklog.md, unlike progress_signature above. progress_signature
+    answers "did anything happen last turn" (worklog changing counts); this
+    answers "is there new/changed *work*" for paused_recheck_loop, which
+    only cares whether todos/ itself has moved since the loop-breaker paused
+    — a worklog entry alone (e.g. a note-only turn) shouldn't count as new
+    work worth waking up for."""
+    h = hashlib.sha256()
+    for path in sorted(todos_dir.rglob("TODO.md")) if todos_dir.exists() else []:
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+class PausedRecheckAction(str, Enum):
+    STAY_PAUSED = "stay_paused"  # nothing new since the pause, or already asked about this exact change
+    AUTO_RESUME = "auto_resume"  # new/changed todos + nighttime -> lift the pause and let pacing_loop take over
+    ASK = "ask"                  # new/changed todos + daytime -> ask before lifting the pause
+
+
+def decide_paused_recheck_action(
+    *, is_night: bool, todos_changed: bool, already_asked_for_current_signature: bool,
+) -> PausedRecheckAction:
+    """Pure decision point for paused_recheck_loop's periodic check while
+    the loop-breaker's own self-pause (alert_and_pause) is in effect —
+    mirrors human_in_loop.decide_action's shape (pure, no I/O) for the same
+    testability reason. Deliberately does NOT apply to a manual `/pause` —
+    see paused_recheck_loop's own docstring for why that's scoped out."""
+    if not todos_changed:
+        return PausedRecheckAction.STAY_PAUSED
+    if is_night:
+        return PausedRecheckAction.AUTO_RESUME
+    if already_asked_for_current_signature:
+        return PausedRecheckAction.STAY_PAUSED
+    return PausedRecheckAction.ASK
 
 
 # --- state persistence (SQUEEZER_HOME/state/*.json) ---
@@ -229,7 +267,21 @@ def worker_loop(work_queue: "queue.Queue[str]", stop_event: threading.Event, bus
 
 
 def alert_and_pause(reason: str):
-    (_config.state_dir() / "paused").touch()
+    """Self-pause on the loop-breaker's own trigger (see worker_loop). Unlike
+    a manual `/pause` (which just touches an empty file — see
+    classify_command's PAUSE handling), this writes the todos-only
+    fingerprint at the moment of pausing, so paused_recheck_loop can later
+    tell "new work appeared" from "still the same stuck state" without
+    re-triggering on the exact item that caused the pause in the first
+    place."""
+    info = {
+        "source": "loop_breaker",
+        "reason": reason,
+        "paused_at": datetime.now().isoformat(),
+        "todos_signature_at_pause": todos_signature(_config.todos_dir()),
+        "asked_for_signature": None,
+    }
+    (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
     log(f"PAUSING (loop-breaker): {reason}")
     try:
         telegram_lib.send_message(f"Pausing myself: {reason} Check todos/TODO.md, then send /resume when it's clear to continue.")
@@ -239,6 +291,21 @@ def alert_and_pause(reason: str):
 
 def is_paused() -> bool:
     return (_config.state_dir() / "paused").exists()
+
+
+def load_paused_info() -> dict | None:
+    """None if not paused. Otherwise the JSON `alert_and_pause` wrote
+    (`source: "loop_breaker"`, plus its fingerprint/reason), or
+    `{"source": "manual"}` for a plain `/pause` (an empty touched file,
+    or any other non-JSON content) — paused_recheck_loop only acts on the
+    former; see its own docstring for why a manual pause is left alone."""
+    path = _config.state_dir() / "paused"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return {"source": "manual"}
 
 
 # --- pacing: decides whether a continuation turn or a human-in-loop ask is due ---
@@ -310,6 +377,61 @@ def _budget_cap_reached(hil_state: dict, window_state: dict) -> bool:
     used = usage_lib.total_used_since(window_state)
     total = window_state.get("estimated_window_total") or usage_lib.DEFAULT_ESTIMATE
     return (used / total) * 100 >= cap
+
+
+# --- paused_recheck: while loop-breaker-paused, periodically check for new
+# todos/ content and either lift the pause (at night) or ask (during the
+# day) — see decide_paused_recheck_action. Deliberately does NOT apply to a
+# manual `/pause`: that's an explicit human "stop", and should stay stopped
+# until an explicit `/resume`, not get silently lifted just because new
+# work showed up. A tighter interval than PACING_INTERVAL isn't warranted —
+# new todos items are a human/smart-mode-researcher action, not something
+# that needs sub-minute latency to react to. ---
+
+def paused_recheck_loop(stop_event: threading.Event):
+    while not stop_event.wait(PAUSED_RECHECK_INTERVAL):
+        try:
+            _paused_recheck_tick()
+        except Exception as e:  # noqa: BLE001 - one bad tick must not kill the loop
+            log(f"paused recheck tick error (will retry next tick): {e}")
+
+
+def _paused_recheck_tick():
+    info = load_paused_info()
+    if info is None or info.get("source") != "loop_breaker":
+        return  # not paused, or a manual /pause — leave those alone
+
+    current_sig = todos_signature(_config.todos_dir())
+    now = datetime.now()
+    action = decide_paused_recheck_action(
+        is_night=usage_lib.is_within_no_reserve_hours(now.time()),
+        todos_changed=(current_sig != info.get("todos_signature_at_pause")),
+        already_asked_for_current_signature=(info.get("asked_for_signature") == current_sig),
+    )
+
+    if action == PausedRecheckAction.AUTO_RESUME:
+        (_config.state_dir() / "paused").unlink(missing_ok=True)
+        log("auto-resuming (loop-breaker pause) — new todos/ content detected during no_reserve_hours")
+        try:
+            telegram_lib.send_message(
+                "New work appeared in todos/ while I was paused (self-paused earlier by my "
+                "loop-breaker) — resuming automatically since it's within no_reserve_hours. "
+                "Send /pause if you'd rather I wait."
+            )
+        except Exception as e:  # noqa: BLE001
+            log(f"could not send auto-resume notice: {e}")
+    elif action == PausedRecheckAction.ASK:
+        try:
+            telegram_lib.send_message(
+                "New work appeared in todos/ while I was paused (self-paused earlier by my "
+                "loop-breaker). Send /resume to continue, or leave it if you'd rather I stay paused."
+            )
+        except Exception as e:  # noqa: BLE001
+            log(f"could not send paused-recheck ask: {e}")
+            return
+        info["asked_for_signature"] = current_sig
+        (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
+    # STAY_PAUSED: nothing new, or already asked about this exact change — stay quiet.
 
 
 # --- telegram: handles pause/resume/mode instantly, queues everything else ---
@@ -404,6 +526,7 @@ def main():
         threading.Thread(target=pacing_loop, args=(work_queue, stop_event), daemon=True),
         threading.Thread(target=self_calibrate_loop, args=(stop_event,), daemon=True),
         threading.Thread(target=worker_loop, args=(work_queue, stop_event, busy_event), daemon=True),
+        threading.Thread(target=paused_recheck_loop, args=(stop_event,), daemon=True),
     ]
     for t in threads:
         t.start()

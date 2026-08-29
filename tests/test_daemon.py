@@ -147,3 +147,79 @@ def test_progress_signature_handles_missing_files(tmp_path):
     todos_dir.mkdir()
     worklog = tmp_path / "worklog.md"  # doesn't exist
     assert isinstance(daemon_mod.progress_signature(worklog, todos_dir), str)
+
+
+# --- todos_signature ---
+
+def test_todos_signature_changes_when_todo_changes(tmp_path):
+    todos_dir = tmp_path / "todos"
+    todos_dir.mkdir()
+    (todos_dir / "TODO.md").write_text("- [ ] a")
+
+    sig1 = daemon_mod.todos_signature(todos_dir)
+    (todos_dir / "TODO.md").write_text("- [ ] a\n- [ ] a new item")
+    sig2 = daemon_mod.todos_signature(todos_dir)
+    assert sig1 != sig2
+
+
+def test_todos_signature_ignores_worklog_content(tmp_path):
+    """Unlike progress_signature, todos_signature must NOT change just
+    because worklog.md changed — paused_recheck_loop only cares about new
+    *work* (todos/), not "a turn happened and left a note"."""
+    todos_dir = tmp_path / "todos"
+    todos_dir.mkdir()
+    (todos_dir / "TODO.md").write_text("- [ ] a")
+    worklog = tmp_path / "worklog.md"
+    worklog.write_text("entry 1")
+
+    sig1 = daemon_mod.todos_signature(todos_dir)
+    worklog.write_text("entry 1\nentry 2 — a completely different worklog entry")
+    sig2 = daemon_mod.todos_signature(todos_dir)
+    assert sig1 == sig2
+
+
+def test_todos_signature_handles_missing_dir(tmp_path):
+    assert isinstance(daemon_mod.todos_signature(tmp_path / "nonexistent"), str)
+
+
+# --- decide_paused_recheck_action ---
+
+PausedRecheckAction = daemon_mod.PausedRecheckAction
+
+
+def _decide_recheck(is_night=False, todos_changed=True, already_asked_for_current_signature=False):
+    return daemon_mod.decide_paused_recheck_action(
+        is_night=is_night,
+        todos_changed=todos_changed,
+        already_asked_for_current_signature=already_asked_for_current_signature,
+    )
+
+
+def test_nothing_changed_stays_paused_regardless_of_time_of_day():
+    assert _decide_recheck(todos_changed=False, is_night=True) == PausedRecheckAction.STAY_PAUSED
+    assert _decide_recheck(todos_changed=False, is_night=False) == PausedRecheckAction.STAY_PAUSED
+
+
+def test_changed_todos_at_night_auto_resumes():
+    assert _decide_recheck(todos_changed=True, is_night=True) == PausedRecheckAction.AUTO_RESUME
+
+
+def test_changed_todos_during_day_asks():
+    assert _decide_recheck(todos_changed=True, is_night=False) == PausedRecheckAction.ASK
+
+
+def test_changed_todos_during_day_already_asked_stays_paused():
+    """Don't re-send the same "new work appeared" ask every 5 minutes for
+    the same unchanged-since-asking todos content."""
+    assert _decide_recheck(
+        todos_changed=True, is_night=False, already_asked_for_current_signature=True,
+    ) == PausedRecheckAction.STAY_PAUSED
+
+
+def test_changed_todos_during_day_already_asked_but_changed_again_asks():
+    """A *further* change after the last ask (already_asked_for_current_signature
+    compares against the *current* signature, which the caller recomputes
+    each tick) should ask again rather than staying silently paused forever."""
+    assert _decide_recheck(
+        todos_changed=True, is_night=False, already_asked_for_current_signature=False,
+    ) == PausedRecheckAction.ASK
