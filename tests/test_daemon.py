@@ -5,6 +5,7 @@ timers) aren't unit tested here, matching this repo's existing convention of
 testing logic modules directly and leaving thin process/glue code (formerly
 bin/orchestrator.py, bin/telegram_bridge.py — neither had tests) uncovered."""
 import importlib.util
+from datetime import datetime, timedelta
 from pathlib import Path
 
 SQUEEZER_DIR = Path(__file__).resolve().parent.parent
@@ -186,12 +187,19 @@ def test_todos_signature_handles_missing_dir(tmp_path):
 
 PausedRecheckAction = daemon_mod.PausedRecheckAction
 
+_NOW = datetime(2026, 8, 29, 12, 0, 0)  # arbitrary fixed "daytime" instant
 
-def _decide_recheck(is_night=False, todos_changed=True, already_asked_for_current_signature=False):
+
+def _decide_recheck(
+    now=_NOW, is_night=False, todos_changed=True,
+    already_asked_for_current_signature=False, snoozed_until=None,
+):
     return daemon_mod.decide_paused_recheck_action(
+        now=now,
         is_night=is_night,
         todos_changed=todos_changed,
         already_asked_for_current_signature=already_asked_for_current_signature,
+        snoozed_until=snoozed_until,
     )
 
 
@@ -223,3 +231,33 @@ def test_changed_todos_during_day_already_asked_but_changed_again_asks():
     assert _decide_recheck(
         todos_changed=True, is_night=False, already_asked_for_current_signature=False,
     ) == PausedRecheckAction.ASK
+
+
+def test_active_snooze_suppresses_the_daytime_ask():
+    """After a human declines ("no, check me in 2 hours"), no further ask
+    (or spam) until the snooze deadline passes — this is what actually
+    stops the "check and disturb every 5 minutes" behavior being fixed."""
+    assert _decide_recheck(
+        now=_NOW, snoozed_until=_NOW + timedelta(hours=2),
+        todos_changed=True, is_night=False,
+    ) == PausedRecheckAction.STAY_PAUSED
+
+
+def test_expired_snooze_asks_again_even_if_already_asked_for_this_signature():
+    """Once the snooze deadline passes, ask again — re-silencing because
+    "already_asked_for_current_signature" is still true would defeat the
+    entire point of letting the human pick a check-back time."""
+    assert _decide_recheck(
+        now=_NOW, snoozed_until=_NOW - timedelta(minutes=1),
+        todos_changed=True, is_night=False, already_asked_for_current_signature=True,
+    ) == PausedRecheckAction.ASK
+
+
+def test_snooze_does_not_block_nighttime_auto_resume():
+    """A daytime "don't disturb me" snooze says nothing about whether
+    overnight auto-resume is welcome — night-time autonomy is a stronger,
+    pre-existing guarantee and the two aren't in tension."""
+    assert _decide_recheck(
+        now=_NOW, snoozed_until=_NOW + timedelta(hours=2),
+        todos_changed=True, is_night=True,
+    ) == PausedRecheckAction.AUTO_RESUME

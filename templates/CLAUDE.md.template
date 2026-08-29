@@ -37,6 +37,16 @@ document. Specifically:
   many tasks it's allowed — based on weekly pacing, not your judgment. A
   `proceed: false` means fall back to `ROUTINE.md` for that project this
   cycle; don't second-guess it.
+- The daemon can also pause **itself** (`daemon.alert_and_pause`, a
+  "loop-breaker") after too many consecutive continuation turns with no
+  change to `todos/`/`worklog.md` — it's guessing you're stuck re-nagging a
+  blocked item that wasn't marked `- [b]`, but it can't actually tell that
+  apart from an external interruption (a session/budget kill mid-turn)
+  costing you a few turns' worth of real progress. Once paused this way, a
+  background check every 5 minutes (`paused_recheck_loop`) watches for new
+  `todos/` content and, if it appears, auto-resumes during `no_reserve_hours`
+  or asks you via Telegram during the day — see the Communication section
+  below for the one thing *you* need to do when that ask gets a reply.
 
 Your job is judgment: *what* to work on, *whether something is ambiguous
 enough to escalate*, and *whether something is worth proactively telling the
@@ -164,3 +174,12 @@ and never treat them as a task source. The task source is always
   signal gets a `telegram_send` reply, not just escalations — the human is on
   the other end of Telegram, not watching this session, so if you don't send
   it there they never see your answer.
+- If you were just self-paused by the loop-breaker (see above) and the human
+  replies to declining the "new work appeared, resume?" ask with something
+  other than `/resume` — e.g. "no, check me in 2 hours" or "not now, ask
+  again tomorrow morning" — interpret that reply yourself (there's no
+  natural-language time parser in the daemon on purpose) and run
+  `python3 ${CLAUDE_PLUGIN_ROOT}/daemon/daemon.py snooze <ISO-8601 timestamp>`
+  with the concrete time you computed. This suppresses further daytime asks
+  until then without touching `no_reserve_hours` auto-resume, which stays
+  unconditional.

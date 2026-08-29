@@ -141,17 +141,38 @@ class PausedRecheckAction(str, Enum):
 
 
 def decide_paused_recheck_action(
-    *, is_night: bool, todos_changed: bool, already_asked_for_current_signature: bool,
+    *,
+    now: datetime,
+    is_night: bool,
+    todos_changed: bool,
+    already_asked_for_current_signature: bool,
+    snoozed_until: "datetime | None" = None,
 ) -> PausedRecheckAction:
     """Pure decision point for paused_recheck_loop's periodic check while
     the loop-breaker's own self-pause (alert_and_pause) is in effect —
     mirrors human_in_loop.decide_action's shape (pure, no I/O) for the same
     testability reason. Deliberately does NOT apply to a manual `/pause` —
-    see paused_recheck_loop's own docstring for why that's scoped out."""
+    see paused_recheck_loop's own docstring for why that's scoped out.
+
+    `snoozed_until`: set when a human explicitly declined the daytime ASK
+    ("no, don't proceed") and was then asked when to check back — see
+    save_paused_snooze's docstring for who sets this and why it isn't
+    parsed here. Only suppresses the *daytime ASK* path: a still-active
+    snooze does NOT block AUTO_RESUME, since night-time autonomy is a
+    stronger, pre-existing guarantee than "don't disturb me during the
+    day" and the two situations aren't in tension (the human declining a
+    daytime ask says nothing about whether overnight auto-resume is
+    welcome). Once `now >= snoozed_until`, the snooze is spent — this
+    re-asks even if already_asked_for_current_signature is still true for
+    the same unchanged todos content, since re-silencing after an expired
+    snooze would defeat the entire point of asking "when should I check
+    back" in the first place."""
     if not todos_changed:
         return PausedRecheckAction.STAY_PAUSED
     if is_night:
         return PausedRecheckAction.AUTO_RESUME
+    if snoozed_until is not None:
+        return PausedRecheckAction.STAY_PAUSED if now < snoozed_until else PausedRecheckAction.ASK
     if already_asked_for_current_signature:
         return PausedRecheckAction.STAY_PAUSED
     return PausedRecheckAction.ASK
@@ -280,6 +301,7 @@ def alert_and_pause(reason: str):
         "paused_at": datetime.now().isoformat(),
         "todos_signature_at_pause": todos_signature(_config.todos_dir()),
         "asked_for_signature": None,
+        "snoozed_until": None,
     }
     (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
     log(f"PAUSING (loop-breaker): {reason}")
@@ -306,6 +328,26 @@ def load_paused_info() -> dict | None:
         return json.loads(path.read_text())
     except (json.JSONDecodeError, ValueError):
         return {"source": "manual"}
+
+
+def save_paused_snooze(until: datetime) -> bool:
+    """Sets (or clears, with a past `until`) the snooze deadline
+    decide_paused_recheck_action's daytime ASK path respects. Deliberately
+    NOT called from anywhere in this file — daemon.py has no natural-
+    language time parser and shouldn't grow one; a human's "no, check me
+    in 2 hours" reply is ordinary Telegram text, which the daemon already
+    queues as work for a spawned `claude -p` turn (see classify_command's
+    MESSAGE case) same as any other message. That spawned turn is what's
+    expected to interpret the reply and call this — it has the full
+    conversation context (it just asked the question), unlike this
+    process. Returns False (no-op) if not currently loop-breaker-paused,
+    since there's nothing to snooze."""
+    info = load_paused_info()
+    if info is None or info.get("source") != "loop_breaker":
+        return False
+    info["snoozed_until"] = until.isoformat()
+    (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
+    return True
 
 
 # --- pacing: decides whether a continuation turn or a human-in-loop ask is due ---
@@ -403,10 +445,19 @@ def _paused_recheck_tick():
 
     current_sig = todos_signature(_config.todos_dir())
     now = datetime.now()
+    snoozed_until = None
+    if info.get("snoozed_until"):
+        try:
+            snoozed_until = datetime.fromisoformat(info["snoozed_until"])
+        except ValueError:
+            snoozed_until = None
+
     action = decide_paused_recheck_action(
+        now=now,
         is_night=usage_lib.is_within_no_reserve_hours(now.time()),
         todos_changed=(current_sig != info.get("todos_signature_at_pause")),
         already_asked_for_current_signature=(info.get("asked_for_signature") == current_sig),
+        snoozed_until=snoozed_until,
     )
 
     if action == PausedRecheckAction.AUTO_RESUME:
@@ -424,14 +475,18 @@ def _paused_recheck_tick():
         try:
             telegram_lib.send_message(
                 "New work appeared in todos/ while I was paused (self-paused earlier by my "
-                "loop-breaker). Send /resume to continue, or leave it if you'd rather I stay paused."
+                "loop-breaker). Send /resume to continue, or tell me when to check back "
+                "(e.g. \"in 2 hours\", \"tomorrow morning\") and I'll wait until then instead "
+                "of asking again right away."
             )
         except Exception as e:  # noqa: BLE001
             log(f"could not send paused-recheck ask: {e}")
             return
         info["asked_for_signature"] = current_sig
+        info["snoozed_until"] = None  # any prior snooze has now been acted on (asked again)
         (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
-    # STAY_PAUSED: nothing new, or already asked about this exact change — stay quiet.
+    # STAY_PAUSED: nothing new, still within a snooze window, or already asked
+    # about this exact change — stay quiet either way.
 
 
 # --- telegram: handles pause/resume/mode instantly, queues everything else ---
@@ -541,5 +596,31 @@ def main():
             t.join(timeout=5)
 
 
+def cmd_snooze(until_iso: str) -> None:
+    """`python3 daemon.py snooze <ISO-8601 timestamp>` — the one-shot CLI a
+    spawned `claude -p` turn runs after interpreting a human's "no, check
+    me back at <time>" reply to the paused_recheck_loop daytime ASK (see
+    save_paused_snooze's docstring for why the parsing happens in that
+    turn, not here). Not meant to be run by a human directly; the
+    ISO-formatted arg is what the turn is expected to compute from
+    whatever natural-language time the human actually said."""
+    try:
+        until = datetime.fromisoformat(until_iso)
+    except ValueError:
+        print(f"not a valid ISO-8601 timestamp: {until_iso!r}", file=sys.stderr)
+        sys.exit(1)
+    if save_paused_snooze(until):
+        print(f"snoozed paused-recheck asks until {until.isoformat()}")
+    else:
+        print("not currently loop-breaker-paused — nothing to snooze", file=sys.stderr)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) >= 2 and sys.argv[1] == "snooze":
+        if len(sys.argv) < 3:
+            print("usage: daemon.py snooze <ISO-8601 timestamp>", file=sys.stderr)
+            sys.exit(1)
+        cmd_snooze(sys.argv[2])
+    else:
+        main()
