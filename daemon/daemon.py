@@ -32,6 +32,7 @@ from enum import Enum
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_mcp_deps  # noqa: E402
 import config as _config  # noqa: E402
 import human_in_loop  # noqa: E402
 import telegram_lib  # noqa: E402
@@ -585,6 +586,14 @@ def main():
     ]
     for t in threads:
         t.start()
+
+    if not check_mcp_deps.is_importable(sys.executable):
+        log(
+            "WARNING: the mcp Python package is not importable by "
+            f"{sys.executable} — the squeezer-telegram MCP server (telegram_send) "
+            "will fail to start, so spawned turns have no way to reply on Telegram. "
+            "Re-run `/squeezer:setup` (step 8, check_mcp_deps.py) to fix."
+        )
 
     log("squeezer daemon started")
     try:
