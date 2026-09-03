@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time as time_mod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -52,6 +52,8 @@ class TelegramCommand(str, Enum):
     RESUME = "resume"
     AUTO = "auto"
     MANUAL = "manual"
+    ELEVATE = "elevate"
+    LOCKDOWN = "lockdown"
     MESSAGE = "message"
 
 
@@ -65,6 +67,10 @@ def classify_command(text: str) -> TelegramCommand:
         return TelegramCommand.AUTO
     if stripped in ("/manual", "/human"):
         return TelegramCommand.MANUAL
+    if stripped.startswith("/elevate"):
+        return TelegramCommand.ELEVATE
+    if stripped == "/lockdown":
+        return TelegramCommand.LOCKDOWN
     return TelegramCommand.MESSAGE
 
 
@@ -599,6 +605,51 @@ def _handle_telegram_message(
         _config.set_mode("human_in_loop")
         log("switched to human_in_loop mode")
         telegram_lib.send_message("Switched to human-in-loop mode.", cfg)
+        return
+
+    if command == TelegramCommand.ELEVATE:
+        parsed = totp.parse_elevate_command(text)
+        if parsed is None:
+            telegram_lib.send_message(
+                "Usage: /elevate <6-digit code> <hours>, hours one of 2, 4, 8, 24.", cfg
+            )
+            return
+        code, hours = parsed
+        totp_state = load_totp_state()
+        now = time_mod.time()
+        if totp.is_locked_out(totp_state, now):
+            log("ELEVATE rejected: rate-limited")
+            telegram_lib.send_message("Too many recent failed codes — locked out for a bit. Try again shortly.", cfg)
+            return
+        secret = _config.load_env().get("TOTP_SECRET")
+        if not secret:
+            log("ELEVATE rejected: no TOTP_SECRET configured")
+            telegram_lib.send_message("2FA isn't set up yet — run /squeezer:2fa-setup first.", cfg)
+            return
+        ok, matched_step = totp.verify_code(secret, code, totp_state.get("last_used_step"), now)
+        if not ok:
+            save_totp_state(totp.record_failed_attempt(totp_state, now))
+            log("ELEVATE rejected: invalid code")
+            telegram_lib.send_message("Invalid or expired code.", cfg)
+            return
+        totp_state["last_used_step"] = matched_step
+        save_totp_state(totp_state)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+        expires_at_iso = expires_at.isoformat()
+        save_elevation_state({"expires_at": expires_at_iso})
+        log(f"ELEVATE granted until {expires_at_iso}")
+        telegram_lib.send_message(
+            f"Elevated until {expires_at_iso} — soft-deny protections (deploys, pushes, etc.) "
+            "may be crossed with your explicit authorization. hard_deny and all credential/"
+            "sandbox protections remain fully in force. Send /lockdown to end this early.",
+            cfg,
+        )
+        return
+
+    if command == TelegramCommand.LOCKDOWN:
+        save_elevation_state({"expires_at": None})
+        log("LOCKDOWN: elevation ended")
+        telegram_lib.send_message("Elevation ended.", cfg)
         return
 
     # Ordinary message. If we're waiting on a human-in-loop reply, this is

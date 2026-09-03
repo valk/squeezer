@@ -367,3 +367,23 @@ def test_current_elevation_overlay_path_active_with_naive_now(tmp_path, monkeypa
     now = datetime(2026, 9, 4, 12, 0, 0)  # naive
     path = daemon_mod.current_elevation_overlay_path(now=now)
     assert path is not None
+
+
+# --- classify_command: elevate / lockdown ---
+
+def test_classify_elevate_command():
+    assert daemon_mod.classify_command("/elevate 123456 8") == daemon_mod.TelegramCommand.ELEVATE
+
+
+def test_classify_elevate_with_bad_args_is_still_elevate():
+    # classify_command only recognizes the shape; totp.parse_elevate_command
+    # (already tested in test_totp.py) is what validates code/hours.
+    assert daemon_mod.classify_command("/elevate nonsense") == daemon_mod.TelegramCommand.ELEVATE
+
+
+def test_classify_lockdown_command():
+    assert daemon_mod.classify_command("/lockdown") == daemon_mod.TelegramCommand.LOCKDOWN
+
+
+def test_classify_ordinary_text_still_message_after_elevate_added():
+    assert daemon_mod.classify_command("elevate my mood please") == daemon_mod.TelegramCommand.MESSAGE
