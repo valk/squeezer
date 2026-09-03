@@ -286,3 +286,25 @@ def test_save_and_load_elevation_state_round_trips(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     daemon_mod.save_elevation_state({"expires_at": "2026-09-04T18:00:00+00:00"})
     assert daemon_mod.load_elevation_state() == {"expires_at": "2026-09-04T18:00:00+00:00"}
+
+
+def test_load_totp_state_recovers_from_corrupt_file(tmp_path, monkeypatch):
+    """Simulate a daemon crash mid-write leaving a truncated/corrupt JSON file.
+    load_totp_state should gracefully fall back to defaults rather than crash."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    # Create state dir and write garbage/truncated JSON
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "totp.json").write_text("{invalid json truncated")
+    state = daemon_mod.load_totp_state()
+    assert state == {"last_used_step": None, "failed_attempts": [], "locked_until": None}
+
+
+def test_load_elevation_state_recovers_from_corrupt_file(tmp_path, monkeypatch):
+    """Simulate a daemon crash mid-write leaving a truncated/corrupt JSON file.
+    load_elevation_state should gracefully fall back to defaults rather than crash."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    # Create state dir and write garbage/truncated JSON
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "elevation.json").write_text("{incomplete")
+    state = daemon_mod.load_elevation_state()
+    assert state == {"expires_at": None}

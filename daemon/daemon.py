@@ -217,23 +217,29 @@ def save_hil_state(state: dict) -> None:
 def load_totp_state() -> dict:
     path = _state_path("totp.json")
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
     return {"last_used_step": None, "failed_attempts": [], "locked_until": None}
 
 
 def save_totp_state(state: dict) -> None:
-    _state_path("totp.json").write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(_state_path("totp.json"), json.dumps(state, indent=2) + "\n")
 
 
 def load_elevation_state() -> dict:
     path = _state_path("elevation.json")
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
     return {"expires_at": None}
 
 
 def save_elevation_state(state: dict) -> None:
-    _state_path("elevation.json").write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(_state_path("elevation.json"), json.dumps(state, indent=2) + "\n")
 
 
 def log(msg: str):
