@@ -171,3 +171,50 @@ def test_old_failures_outside_window_do_not_count_toward_lockout():
         state = totp.record_failed_attempt(state, now=now + i)
     state = totp.record_failed_attempt(state, now=now + 4 + 360)
     assert state["locked_until"] is None
+
+
+# --- parse_elevate_command ---
+
+def test_parse_elevate_command_valid():
+    assert totp.parse_elevate_command("/elevate 123456 8") == ("123456", 8)
+
+
+def test_parse_elevate_command_valid_with_extra_whitespace():
+    assert totp.parse_elevate_command("  /elevate   123456   24  ") == ("123456", 24)
+
+
+def test_parse_elevate_command_rejects_non_menu_hours():
+    assert totp.parse_elevate_command("/elevate 123456 6") is None
+
+
+def test_parse_elevate_command_rejects_non_numeric_code():
+    assert totp.parse_elevate_command("/elevate abcdef 8") is None
+
+
+def test_parse_elevate_command_rejects_missing_hours():
+    assert totp.parse_elevate_command("/elevate 123456") is None
+
+
+def test_parse_elevate_command_rejects_non_elevate_text():
+    assert totp.parse_elevate_command("please work on the AAPL task") is None
+
+
+def test_parse_elevate_command_accepts_all_menu_hours():
+    for hours in (2, 4, 8, 24):
+        assert totp.parse_elevate_command(f"/elevate 123456 {hours}") == ("123456", hours)
+
+
+# --- build_elevation_overlay ---
+
+def test_build_elevation_overlay_contains_only_auto_mode_allow():
+    overlay = totp.build_elevation_overlay("2026-09-04T18:00:00+00:00")
+    assert set(overlay.keys()) == {"autoMode"}
+    assert set(overlay["autoMode"].keys()) == {"allow"}
+
+
+def test_build_elevation_overlay_keeps_defaults_and_states_expiry():
+    overlay = totp.build_elevation_overlay("2026-09-04T18:00:00+00:00")
+    allow = overlay["autoMode"]["allow"]
+    assert "$defaults" in allow
+    assert any("2026-09-04T18:00:00+00:00" in entry for entry in allow)
+    assert any("hard_deny" in entry for entry in allow)

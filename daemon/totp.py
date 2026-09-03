@@ -81,3 +81,46 @@ def record_failed_attempt(
 def is_locked_out(state: dict, now: float) -> bool:
     locked_until = state.get("locked_until")
     return locked_until is not None and now < locked_until
+
+
+_ELEVATE_HOURS_CHOICES = (2, 4, 8, 24)
+
+
+def parse_elevate_command(text: str) -> tuple[str, int] | None:
+    """Parses "/elevate <6-digit code> <hours>". `hours` must be one of
+    2, 4, 8, or 24 — the fixed menu, not an arbitrary duration. Returns
+    None for anything malformed, including ordinary non-command text."""
+    parts = text.strip().split()
+    if len(parts) != 3 or parts[0].lower() != "/elevate":
+        return None
+    code, hours_str = parts[1], parts[2]
+    if not (code.isdigit() and len(code) == 6):
+        return None
+    if not hours_str.isdigit():
+        return None
+    hours = int(hours_str)
+    if hours not in _ELEVATE_HOURS_CHOICES:
+        return None
+    return code, hours
+
+
+def build_elevation_overlay(expires_at_iso: str) -> dict:
+    """The --settings overlay content for an active elevation window. Only
+    ever adds an autoMode.allow entry — never hard_deny, soft_deny,
+    environment, or anything outside autoMode. See the design spec's
+    "What this can and can't actually do" section for why hard_deny is
+    never touched here."""
+    return {
+        "autoMode": {
+            "allow": [
+                "$defaults",
+                (
+                    "The user explicitly authorized crossing routine soft-deny "
+                    "protections (deploys, pushes, and similar destructive-but-"
+                    "reversible operations within registered projects) via a "
+                    f"verified 2FA elevation, valid until {expires_at_iso}. "
+                    "This does not apply to anything in hard_deny."
+                ),
+            ]
+        }
+    }
