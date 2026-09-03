@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -36,6 +36,7 @@ import check_mcp_deps  # noqa: E402
 import config as _config  # noqa: E402
 import human_in_loop  # noqa: E402
 import telegram_lib  # noqa: E402
+import totp  # noqa: E402
 import usage_lib  # noqa: E402
 
 PACING_INTERVAL = 30  # seconds between pacing ticks
@@ -67,12 +68,16 @@ def classify_command(text: str) -> TelegramCommand:
     return TelegramCommand.MESSAGE
 
 
-def build_claude_command(prompt: str, session_id: str | None, project_paths: list[str]) -> list[str]:
+def build_claude_command(
+    prompt: str, session_id: str | None, project_paths: list[str], settings_overlay_path: str | None = None
+) -> list[str]:
     cmd = ["claude", "-p", prompt, "--permission-mode", "auto", "--output-format", "json"]
     if session_id:
         cmd += ["--resume", session_id]
     for path in project_paths:
         cmd += ["--add-dir", path]
+    if settings_overlay_path:
+        cmd += ["--settings", settings_overlay_path]
     return cmd
 
 
@@ -242,6 +247,27 @@ def save_elevation_state(state: dict) -> None:
     _config.atomic_write_text(_state_path("elevation.json"), json.dumps(state, indent=2) + "\n")
 
 
+def current_elevation_overlay_path(now: datetime | None = None) -> str | None:
+    """None when no elevation is active or it has expired. Otherwise
+    (re)writes state/elevation_overlay.json with the current expiry baked
+    in and returns its path, so build_claude_command can pass it via
+    --settings for this turn only."""
+    now = now or datetime.now(timezone.utc)
+    expires_at_iso = load_elevation_state().get("expires_at")
+    if not expires_at_iso:
+        return None
+    expires_at = datetime.fromisoformat(expires_at_iso)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if now >= expires_at:
+        return None
+    overlay_path = _state_path("elevation_overlay.json")
+    overlay_path.write_text(json.dumps(totp.build_elevation_overlay(expires_at_iso), indent=2) + "\n")
+    return str(overlay_path)
+
+
 def log(msg: str):
     print(f"[{time_mod.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
@@ -254,7 +280,8 @@ def spawn_claude(prompt: str) -> dict:
     "error": str|None}. Never raises."""
     session_state = load_session_state()
     project_paths = [p["path"] for p in _config.projects()]
-    cmd = build_claude_command(prompt, session_state.get("session_id"), project_paths)
+    overlay_path = current_elevation_overlay_path()
+    cmd = build_claude_command(prompt, session_state.get("session_id"), project_paths, overlay_path)
     try:
         proc = subprocess.run(
             cmd, cwd=_config.squeezer_home(), capture_output=True, text=True,

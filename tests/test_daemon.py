@@ -5,7 +5,8 @@ timers) aren't unit tested here, matching this repo's existing convention of
 testing logic modules directly and leaving thin process/glue code (formerly
 bin/orchestrator.py, bin/telegram_bridge.py — neither had tests) uncovered."""
 import importlib.util
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SQUEEZER_DIR = Path(__file__).resolve().parent.parent
@@ -308,3 +309,41 @@ def test_load_elevation_state_recovers_from_corrupt_file(tmp_path, monkeypatch):
     (tmp_path / "state" / "elevation.json").write_text("{incomplete")
     state = daemon_mod.load_elevation_state()
     assert state == {"expires_at": None}
+
+
+# --- build_claude_command settings overlay ---
+
+def test_build_claude_command_without_overlay_omits_settings_flag():
+    cmd = daemon_mod.build_claude_command("hi", None, [])
+    assert "--settings" not in cmd
+
+
+def test_build_claude_command_with_overlay_appends_settings_flag():
+    cmd = daemon_mod.build_claude_command("hi", None, [], settings_overlay_path="/tmp/overlay.json")
+    assert "--settings" in cmd
+    assert cmd[cmd.index("--settings") + 1] == "/tmp/overlay.json"
+
+
+# --- current_elevation_overlay_path ---
+
+def test_current_elevation_overlay_path_none_when_no_elevation(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    assert daemon_mod.current_elevation_overlay_path(now=datetime(2026, 9, 4, 12, 0, 0)) is None
+
+
+def test_current_elevation_overlay_path_none_when_expired(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": "2026-09-04T10:00:00+00:00"})
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert daemon_mod.current_elevation_overlay_path(now=now) is None
+
+
+def test_current_elevation_overlay_path_writes_overlay_when_active(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": "2026-09-04T18:00:00+00:00"})
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    path = daemon_mod.current_elevation_overlay_path(now=now)
+    assert path is not None
+    content = json.loads(Path(path).read_text())
+    assert content["autoMode"]["allow"]
+    assert "hard_deny" in content["autoMode"]["allow"][-1]
