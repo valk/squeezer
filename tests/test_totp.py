@@ -204,6 +204,17 @@ def test_parse_elevate_command_accepts_all_menu_hours():
         assert totp.parse_elevate_command(f"/elevate 123456 {hours}") == ("123456", hours)
 
 
+def test_parse_elevate_command_rejects_non_ascii_digits_in_hours():
+    # Regression: non-ASCII digits like superscript ² would pass isdigit() but
+    # raise ValueError in int() conversion. Must return None instead.
+    assert totp.parse_elevate_command("/elevate 123456 ²") is None
+
+
+def test_parse_elevate_command_rejects_non_ascii_digits_in_code():
+    # Regression: non-ASCII digits in code should also be rejected.
+    assert totp.parse_elevate_command("/elevate ¹²³⁴⁵⁶ 8") is None
+
+
 # --- build_elevation_overlay ---
 
 def test_build_elevation_overlay_contains_only_auto_mode_allow():

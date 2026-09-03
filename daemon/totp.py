@@ -94,9 +94,9 @@ def parse_elevate_command(text: str) -> tuple[str, int] | None:
     if len(parts) != 3 or parts[0].lower() != "/elevate":
         return None
     code, hours_str = parts[1], parts[2]
-    if not (code.isdigit() and len(code) == 6):
+    if not (code.isascii() and code.isdigit() and len(code) == 6):
         return None
-    if not hours_str.isdigit():
+    if not (hours_str.isascii() and hours_str.isdigit()):
         return None
     hours = int(hours_str)
     if hours not in _ELEVATE_HOURS_CHOICES:
