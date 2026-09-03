@@ -67,3 +67,61 @@ def test_totp_at_step_is_six_digits_zero_padded():
     # Regression guard: a leading-zero code must not get truncated to 5 chars.
     code = totp.totp_at_step(_RFC_SECRET, step=1)
     assert len(code) == 6
+
+
+# --- verify_code ---
+
+_SECRET = totp.generate_secret()
+
+
+def test_verify_code_accepts_current_step():
+    now = 1_000_000.0
+    step = totp.current_step(now)
+    code = totp.totp_at_step(_SECRET, step)
+    ok, matched = totp.verify_code(_SECRET, code, last_used_step=None, now=now)
+    assert ok is True
+    assert matched == step
+
+
+def test_verify_code_accepts_one_step_early_or_late():
+    now = 1_000_000.0
+    step = totp.current_step(now)
+    prev_code = totp.totp_at_step(_SECRET, step - 1)
+    next_code = totp.totp_at_step(_SECRET, step + 1)
+    assert totp.verify_code(_SECRET, prev_code, None, now)[0] is True
+    assert totp.verify_code(_SECRET, next_code, None, now)[0] is True
+
+
+def test_verify_code_rejects_two_steps_away():
+    now = 1_000_000.0
+    step = totp.current_step(now)
+    far_code = totp.totp_at_step(_SECRET, step - 2)
+    ok, matched = totp.verify_code(_SECRET, far_code, None, now)
+    assert ok is False
+    assert matched is None
+
+
+def test_verify_code_rejects_wrong_code():
+    now = 1_000_000.0
+    ok, matched = totp.verify_code(_SECRET, "000000", None, now)
+    assert ok is False
+    assert matched is None
+
+
+def test_verify_code_rejects_replay_of_already_used_step():
+    now = 1_000_000.0
+    step = totp.current_step(now)
+    code = totp.totp_at_step(_SECRET, step)
+    # last_used_step == this step: already spent, must not verify again
+    ok, matched = totp.verify_code(_SECRET, code, last_used_step=step, now=now)
+    assert ok is False
+    assert matched is None
+
+
+def test_verify_code_rejects_step_before_last_used():
+    now = 1_000_000.0
+    step = totp.current_step(now)
+    old_code = totp.totp_at_step(_SECRET, step - 1)
+    ok, matched = totp.verify_code(_SECRET, old_code, last_used_step=step, now=now)
+    assert ok is False
+    assert matched is None

@@ -42,3 +42,20 @@ def totp_at_step(secret: str, step: int, digits: int = 6) -> str:
     offset = digest[-1] & 0x0F
     code_int = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
     return str(code_int).zfill(digits)
+
+
+def verify_code(
+    secret: str, code: str, last_used_step: int | None, now: float, period: int = 30
+) -> tuple[bool, int | None]:
+    """Accepts the current time-step and one step on either side (a total
+    90-second window — generous enough for clock skew and Telegram
+    round-trip, narrow enough to keep the search space at 3 codes). A step
+    at or before `last_used_step` is rejected even if the code is
+    numerically correct, so a captured code can't be replayed."""
+    step = current_step(now, period)
+    for candidate in (step - 1, step, step + 1):
+        if last_used_step is not None and candidate <= last_used_step:
+            continue
+        if hmac.compare_digest(totp_at_step(secret, candidate), code):
+            return True, candidate
+    return False, None
