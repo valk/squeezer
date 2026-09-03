@@ -84,6 +84,25 @@ def test_weekly_pace_ratio_none_when_uncalibrated(weekly_state_path):
     assert usage_lib.weekly_pace_ratio() is None
 
 
+def test_load_weekly_state_reinitializes_on_corrupt_file(weekly_state_path):
+    # e.g. a process killed mid-write, leaving a 0-byte file behind.
+    weekly_state_path.write_text("")
+    state = usage_lib.load_weekly_state()
+    assert state["calibrated"] is False
+    assert weekly_state_path.read_text().strip()  # reinitialized on disk, not left empty
+
+
+def test_load_state_reinitializes_on_corrupt_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    state_path = tmp_path / "state" / "window_budget.json"
+    monkeypatch.setattr(usage_lib, "STATE_PATH", state_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text("")
+    state = usage_lib.load_state()
+    assert state["calibrated"] is False
+    assert state_path.read_text().strip()
+
+
 def test_calibrate_week_computes_reset_ts(weekly_state_path):
     usage_lib.cmd_calibrate_week(40, 96)
     state = usage_lib.load_weekly_state()

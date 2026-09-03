@@ -43,6 +43,23 @@ def test_load_config_partial_override_keeps_sibling_defaults(tmp_path, monkeypat
     assert cfg["reserve_percent"] == 20  # untouched sibling key still defaulted
 
 
+def test_load_config_falls_back_to_defaults_on_corrupt_file(tmp_path, monkeypatch):
+    # e.g. a process killed mid-write, leaving a 0-byte file behind.
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config.json").write_text("")
+    cfg = config.load_config()
+    assert cfg["mode"] == "auto"
+    assert cfg["reserve_percent"] == 20
+
+
+def test_atomic_write_text_leaves_no_partial_file_on_disk(tmp_path):
+    path = tmp_path / "nested" / "state.json"
+    config.atomic_write_text(path, '{"a": 1}')
+    assert path.read_text() == '{"a": 1}'
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
 def test_load_config_explicit_null_no_reserve_hours_disables_window(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     tmp_path.mkdir(parents=True, exist_ok=True)

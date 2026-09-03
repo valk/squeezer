@@ -64,8 +64,11 @@ def now_iso():
 
 def load_state():
     if STATE_PATH.exists():
-        with open(STATE_PATH) as f:
-            return json.load(f)
+        try:
+            with open(STATE_PATH) as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — reinitialize below
     state = {
         "window_start_ts": now_iso(),
         "estimated_window_total": DEFAULT_ESTIMATE,
@@ -78,8 +81,7 @@ def load_state():
 
 
 def save_state(state):
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(STATE_PATH, json.dumps(state, indent=2) + "\n")
 
 
 def is_within_no_reserve_hours(now: time | None = None) -> bool:
@@ -109,8 +111,11 @@ def load_reserve_percent() -> float:
 
 def load_weekly_state():
     if WEEKLY_STATE_PATH.exists():
-        with open(WEEKLY_STATE_PATH) as f:
-            return json.load(f)
+        try:
+            with open(WEEKLY_STATE_PATH) as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — reinitialize below
     state = {
         "last_calibrated_percent": 0,
         "reset_ts": None,
@@ -122,8 +127,7 @@ def load_weekly_state():
 
 
 def save_weekly_state(state):
-    WEEKLY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    WEEKLY_STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(WEEKLY_STATE_PATH, json.dumps(state, indent=2) + "\n")
 
 
 def calibrate_weekly(percent: float, hours_until_reset: float) -> dict:

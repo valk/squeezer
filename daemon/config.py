@@ -10,6 +10,20 @@ import json
 import os
 from pathlib import Path
 
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Writes `text` to `path` without ever leaving a truncated/partial file
+    behind if the process is killed mid-write: writes to a sibling temp file
+    first, then atomically renames it into place. Plain Path.write_text()
+    truncates the destination before writing, so a process killed at exactly
+    the wrong moment (e.g. daemon restart, OOM) leaves a 0-byte file — every
+    json.load() of that file forever after fails with "Expecting value:
+    line 1 column 1 (char 0)" until someone notices and deletes it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
 CONFIG_FILENAME = "config.json"
 
 DEFAULT_CONFIG = {
@@ -41,8 +55,11 @@ def load_config() -> dict:
     path = config_path()
     data = {}
     if path.exists():
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = {}  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to defaults
 
     merged = {**DEFAULT_CONFIG, **data}
     for key in _DEEP_MERGE_KEYS:
@@ -52,9 +69,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, indent=2) + "\n")
+    atomic_write_text(config_path(), json.dumps(cfg, indent=2) + "\n")
 
 
 def set_mode(new_mode: str) -> None:

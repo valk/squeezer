@@ -188,24 +188,30 @@ def _state_path(name: str) -> Path:
 def load_session_state() -> dict:
     path = _state_path("session.json")
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
     return {"session_id": None}
 
 
 def save_session_state(state: dict) -> None:
-    _state_path("session.json").write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(_state_path("session.json"), json.dumps(state, indent=2) + "\n")
 
 
 def load_hil_state() -> dict:
     path = _state_path("human_in_loop.json")
     if path.exists():
-        return json.loads(path.read_text())
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
     return {"awaiting_reply": False, "last_asked_window_start": None, "last_asked_date": None,
             "budget_cap_percent": None, "cap_window_start_ts": None}
 
 
 def save_hil_state(state: dict) -> None:
-    _state_path("human_in_loop.json").write_text(json.dumps(state, indent=2) + "\n")
+    _config.atomic_write_text(_state_path("human_in_loop.json"), json.dumps(state, indent=2) + "\n")
 
 
 def log(msg: str):
@@ -304,7 +310,7 @@ def alert_and_pause(reason: str):
         "asked_for_signature": None,
         "snoozed_until": None,
     }
-    (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
+    _config.atomic_write_text(_config.state_dir() / "paused", json.dumps(info, indent=2) + "\n")
     log(f"PAUSING (loop-breaker): {reason}")
     try:
         telegram_lib.send_message(f"Pausing myself: {reason} Check todos/TODO.md, then send /resume when it's clear to continue.")
@@ -347,7 +353,7 @@ def save_paused_snooze(until: datetime) -> bool:
     if info is None or info.get("source") != "loop_breaker":
         return False
     info["snoozed_until"] = until.isoformat()
-    (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
+    _config.atomic_write_text(_config.state_dir() / "paused", json.dumps(info, indent=2) + "\n")
     return True
 
 
@@ -485,7 +491,7 @@ def _paused_recheck_tick():
             return
         info["asked_for_signature"] = current_sig
         info["snoozed_until"] = None  # any prior snooze has now been acted on (asked again)
-        (_config.state_dir() / "paused").write_text(json.dumps(info, indent=2) + "\n")
+        _config.atomic_write_text(_config.state_dir() / "paused", json.dumps(info, indent=2) + "\n")
     # STAY_PAUSED: nothing new, still within a snooze window, or already asked
     # about this exact change — stay quiet either way.
 
