@@ -261,3 +261,28 @@ def test_snooze_does_not_block_nighttime_auto_resume():
         now=_NOW, snoozed_until=_NOW + timedelta(hours=2),
         todos_changed=True, is_night=True,
     ) == PausedRecheckAction.AUTO_RESUME
+
+
+# --- TOTP / elevation state persistence ---
+
+def test_load_totp_state_defaults_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    state = daemon_mod.load_totp_state()
+    assert state == {"last_used_step": None, "failed_attempts": [], "locked_until": None}
+
+
+def test_save_and_load_totp_state_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_totp_state({"last_used_step": 12345, "failed_attempts": [1.0, 2.0], "locked_until": None})
+    assert daemon_mod.load_totp_state() == {"last_used_step": 12345, "failed_attempts": [1.0, 2.0], "locked_until": None}
+
+
+def test_load_elevation_state_defaults_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    assert daemon_mod.load_elevation_state() == {"expires_at": None}
+
+
+def test_save_and_load_elevation_state_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": "2026-09-04T18:00:00+00:00"})
+    assert daemon_mod.load_elevation_state() == {"expires_at": "2026-09-04T18:00:00+00:00"}

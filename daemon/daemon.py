@@ -214,6 +214,28 @@ def save_hil_state(state: dict) -> None:
     _config.atomic_write_text(_state_path("human_in_loop.json"), json.dumps(state, indent=2) + "\n")
 
 
+def load_totp_state() -> dict:
+    path = _state_path("totp.json")
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"last_used_step": None, "failed_attempts": [], "locked_until": None}
+
+
+def save_totp_state(state: dict) -> None:
+    _state_path("totp.json").write_text(json.dumps(state, indent=2) + "\n")
+
+
+def load_elevation_state() -> dict:
+    path = _state_path("elevation.json")
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"expires_at": None}
+
+
+def save_elevation_state(state: dict) -> None:
+    _state_path("elevation.json").write_text(json.dumps(state, indent=2) + "\n")
+
+
 def log(msg: str):
     print(f"[{time_mod.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
