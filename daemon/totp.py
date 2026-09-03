@@ -59,3 +59,25 @@ def verify_code(
         if hmac.compare_digest(totp_at_step(secret, candidate), code):
             return True, candidate
     return False, None
+
+
+def record_failed_attempt(
+    state: dict, now: float, max_attempts: int = 5, window_seconds: int = 300, lockout_seconds: int = 900
+) -> dict:
+    """Records one failed verification attempt and returns a new state dict
+    (the input is never mutated). Failures older than `window_seconds` are
+    dropped before counting. Reaching `max_attempts` within the window sets
+    `locked_until`; the attempt list is cleared at that point since
+    `locked_until` alone gates further attempts from there."""
+    recent = [t for t in state.get("failed_attempts", []) if now - t < window_seconds]
+    recent.append(now)
+    locked_until = state.get("locked_until")
+    if len(recent) >= max_attempts:
+        locked_until = now + lockout_seconds
+        recent = []
+    return {"failed_attempts": recent, "locked_until": locked_until}
+
+
+def is_locked_out(state: dict, now: float) -> bool:
+    locked_until = state.get("locked_until")
+    return locked_until is not None and now < locked_until

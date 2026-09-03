@@ -125,3 +125,49 @@ def test_verify_code_rejects_step_before_last_used():
     ok, matched = totp.verify_code(_SECRET, old_code, last_used_step=step, now=now)
     assert ok is False
     assert matched is None
+
+
+# --- rate limiting ---
+
+def test_is_locked_out_false_for_empty_state():
+    assert totp.is_locked_out({"failed_attempts": [], "locked_until": None}, now=1000.0) is False
+
+
+def test_record_failed_attempt_accumulates_without_locking_below_threshold():
+    state = {"failed_attempts": [], "locked_until": None}
+    now = 1000.0
+    for i in range(4):
+        state = totp.record_failed_attempt(state, now=now + i)
+    assert len(state["failed_attempts"]) == 4
+    assert state["locked_until"] is None
+    assert totp.is_locked_out(state, now=now + 4) is False
+
+
+def test_record_failed_attempt_locks_out_at_fifth_failure_within_window():
+    state = {"failed_attempts": [], "locked_until": None}
+    now = 1000.0
+    for i in range(5):
+        state = totp.record_failed_attempt(state, now=now + i)
+    assert state["locked_until"] == now + 4 + 900
+    assert totp.is_locked_out(state, now=now + 4) is True
+
+
+def test_lockout_expires_after_lockout_seconds():
+    state = {"failed_attempts": [], "locked_until": None}
+    now = 1000.0
+    for i in range(5):
+        state = totp.record_failed_attempt(state, now=now + i)
+    locked_until = state["locked_until"]
+    assert totp.is_locked_out(state, now=locked_until - 1) is True
+    assert totp.is_locked_out(state, now=locked_until + 1) is False
+
+
+def test_old_failures_outside_window_do_not_count_toward_lockout():
+    state = {"failed_attempts": [], "locked_until": None}
+    # 4 failures, then a 6-minute gap (past the 300s window), then 1 more —
+    # should NOT reach the 5-in-5-minutes threshold.
+    now = 1000.0
+    for i in range(4):
+        state = totp.record_failed_attempt(state, now=now + i)
+    state = totp.record_failed_attempt(state, now=now + 4 + 360)
+    assert state["locked_until"] is None
