@@ -256,7 +256,10 @@ def current_elevation_overlay_path(now: datetime | None = None) -> str | None:
     expires_at_iso = load_elevation_state().get("expires_at")
     if not expires_at_iso:
         return None
-    expires_at = datetime.fromisoformat(expires_at_iso)
+    try:
+        expires_at = datetime.fromisoformat(expires_at_iso)
+    except ValueError:
+        return None  # malformed state — fail safe, treat as no active elevation
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if now.tzinfo is None:

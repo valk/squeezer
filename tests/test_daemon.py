@@ -347,3 +347,23 @@ def test_current_elevation_overlay_path_writes_overlay_when_active(tmp_path, mon
     content = json.loads(Path(path).read_text())
     assert content["autoMode"]["allow"]
     assert "hard_deny" in content["autoMode"]["allow"][-1]
+
+
+def test_current_elevation_overlay_path_none_when_expires_at_malformed(tmp_path, monkeypatch):
+    """A malformed/non-ISO expires_at must fail safe (treated as no active
+    elevation), not raise — a crash here would take down every claude -p
+    turn spawn in spawn_claude, which doesn't wrap this call in try/except."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": "not-a-timestamp"})
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert daemon_mod.current_elevation_overlay_path(now=now) is None
+
+
+def test_current_elevation_overlay_path_active_with_naive_now(tmp_path, monkeypatch):
+    """A naive (no tzinfo) now must be normalized to UTC and compared
+    correctly against a tz-aware active expires_at."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": "2026-09-04T18:00:00+00:00"})
+    now = datetime(2026, 9, 4, 12, 0, 0)  # naive
+    path = daemon_mod.current_elevation_overlay_path(now=now)
+    assert path is not None
