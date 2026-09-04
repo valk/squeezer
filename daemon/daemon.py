@@ -11,7 +11,8 @@ hack. Four threads, coordinated only through SQUEEZER_HOME's state files and
 one in-process work queue:
 
   - telegram_poll_loop: long-polls Telegram, handles /pause /resume /auto
-    /manual directly, and queues everything else as work for the worker.
+    /manual /elevate /lockdown directly, and queues everything else as work
+    for the worker.
   - pacing_loop: decides, once per tick, whether fully-automatic or
     human-in-loop mode wants a continuation turn or a "what next" prompt
     right now (see daemon/human_in_loop.py for the mode's own branching).
@@ -27,7 +28,7 @@ import subprocess
 import sys
 import threading
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -36,6 +37,7 @@ import check_mcp_deps  # noqa: E402
 import config as _config  # noqa: E402
 import human_in_loop  # noqa: E402
 import telegram_lib  # noqa: E402
+import totp  # noqa: E402
 import usage_lib  # noqa: E402
 
 PACING_INTERVAL = 30  # seconds between pacing ticks
@@ -51,6 +53,8 @@ class TelegramCommand(str, Enum):
     RESUME = "resume"
     AUTO = "auto"
     MANUAL = "manual"
+    ELEVATE = "elevate"
+    LOCKDOWN = "lockdown"
     MESSAGE = "message"
 
 
@@ -64,15 +68,23 @@ def classify_command(text: str) -> TelegramCommand:
         return TelegramCommand.AUTO
     if stripped in ("/manual", "/human"):
         return TelegramCommand.MANUAL
+    if stripped.startswith("/elevate"):
+        return TelegramCommand.ELEVATE
+    if stripped == "/lockdown":
+        return TelegramCommand.LOCKDOWN
     return TelegramCommand.MESSAGE
 
 
-def build_claude_command(prompt: str, session_id: str | None, project_paths: list[str]) -> list[str]:
+def build_claude_command(
+    prompt: str, session_id: str | None, project_paths: list[str], settings_overlay_path: str | None = None
+) -> list[str]:
     cmd = ["claude", "-p", prompt, "--permission-mode", "auto", "--output-format", "json"]
     if session_id:
         cmd += ["--resume", session_id]
     for path in project_paths:
         cmd += ["--add-dir", path]
+    if settings_overlay_path:
+        cmd += ["--settings", settings_overlay_path]
     return cmd
 
 
@@ -214,6 +226,58 @@ def save_hil_state(state: dict) -> None:
     _config.atomic_write_text(_state_path("human_in_loop.json"), json.dumps(state, indent=2) + "\n")
 
 
+def load_totp_state() -> dict:
+    path = _state_path("totp.json")
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
+    return {"last_used_step": None, "failed_attempts": [], "locked_until": None}
+
+
+def save_totp_state(state: dict) -> None:
+    _config.atomic_write_text(_state_path("totp.json"), json.dumps(state, indent=2) + "\n")
+
+
+def load_elevation_state() -> dict:
+    path = _state_path("elevation.json")
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
+    return {"expires_at": None}
+
+
+def save_elevation_state(state: dict) -> None:
+    _config.atomic_write_text(_state_path("elevation.json"), json.dumps(state, indent=2) + "\n")
+
+
+def current_elevation_overlay_path(now: datetime | None = None) -> str | None:
+    """None when no elevation is active or it has expired. Otherwise
+    (re)writes state/elevation_overlay.json with the current expiry baked
+    in and returns its path, so build_claude_command can pass it via
+    --settings for this turn only."""
+    now = now or datetime.now(timezone.utc)
+    expires_at_iso = load_elevation_state().get("expires_at")
+    if not expires_at_iso:
+        return None
+    try:
+        expires_at = datetime.fromisoformat(expires_at_iso)
+    except (ValueError, TypeError):
+        return None  # malformed state — fail safe, treat as no active elevation
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if now >= expires_at:
+        return None
+    overlay_path = _state_path("elevation_overlay.json")
+    _config.atomic_write_text(overlay_path, json.dumps(totp.build_elevation_overlay(expires_at_iso), indent=2) + "\n")
+    return str(overlay_path)
+
+
 def log(msg: str):
     print(f"[{time_mod.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
@@ -226,7 +290,8 @@ def spawn_claude(prompt: str) -> dict:
     "error": str|None}. Never raises."""
     session_state = load_session_state()
     project_paths = [p["path"] for p in _config.projects()]
-    cmd = build_claude_command(prompt, session_state.get("session_id"), project_paths)
+    overlay_path = current_elevation_overlay_path()
+    cmd = build_claude_command(prompt, session_state.get("session_id"), project_paths, overlay_path)
     try:
         proc = subprocess.run(
             cmd, cwd=_config.squeezer_home(), capture_output=True, text=True,
@@ -541,6 +606,56 @@ def _handle_telegram_message(
         _config.set_mode("human_in_loop")
         log("switched to human_in_loop mode")
         telegram_lib.send_message("Switched to human-in-loop mode.", cfg)
+        return
+
+    if command == TelegramCommand.ELEVATE:
+        parsed = totp.parse_elevate_command(text)
+        if parsed is None:
+            telegram_lib.send_message(
+                "Usage: /elevate <6-digit code> <hours>, hours one of 2, 4, 8, 24.", cfg
+            )
+            return
+        code, hours = parsed
+        totp_state = load_totp_state()
+        now = time_mod.time()
+        if totp.is_locked_out(totp_state, now):
+            log("ELEVATE rejected: rate-limited")
+            telegram_lib.send_message("Too many recent failed codes — locked out for a bit. Try again shortly.", cfg)
+            return
+        secret = _config.load_env().get("TOTP_SECRET")
+        if not secret:
+            log("ELEVATE rejected: no TOTP_SECRET configured")
+            telegram_lib.send_message("2FA isn't set up yet — run /squeezer:2fa-setup first.", cfg)
+            return
+        ok, matched_step = totp.verify_code(secret, code, totp_state.get("last_used_step"), now)
+        if not ok:
+            totp_state.update(totp.record_failed_attempt(totp_state, now))
+            save_totp_state(totp_state)
+            log("ELEVATE rejected: invalid code")
+            telegram_lib.send_message("Invalid or expired code.", cfg)
+            return
+        totp_state["last_used_step"] = matched_step
+        totp_state["failed_attempts"] = []
+        save_totp_state(totp_state)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+        expires_at_iso = expires_at.isoformat()
+        save_elevation_state({"expires_at": expires_at_iso})
+        log(f"ELEVATE granted until {expires_at_iso}")
+        telegram_lib.send_message(
+            f"Elevated until {expires_at_iso} — soft-deny-class actions your auto-mode config "
+            "allows crossing with explicit authorization may now proceed. Anything in hard_deny "
+            "— including squeezer's baseline deploy/force-push/rm -rf protections — remains "
+            "completely untouched. Send /lockdown to end this early.",
+            cfg,
+        )
+        return
+
+    if command == TelegramCommand.LOCKDOWN:
+        save_elevation_state({"expires_at": None})
+        log("LOCKDOWN: elevation ended")
+        telegram_lib.send_message(
+            "Elevation ended — a turn already running keeps its authorization until it finishes.", cfg
+        )
         return
 
     # Ordinary message. If we're waiting on a human-in-loop reply, this is

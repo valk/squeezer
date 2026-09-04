@@ -41,6 +41,18 @@ def baseline_rules(path: str):
     ]
 
 
+def squeezer_home_rules(squeezer_home: str):
+    return [
+        f"Write({squeezer_home}/state/elevation.json) in {squeezer_home}",
+        f"Edit({squeezer_home}/state/elevation.json) in {squeezer_home}",
+        f"Write({squeezer_home}/state/totp.json) in {squeezer_home}",
+        f"Edit({squeezer_home}/state/totp.json) in {squeezer_home}",
+        f"Read({squeezer_home}/.env) in {squeezer_home}",
+        f"Write({squeezer_home}/.env) in {squeezer_home}",
+        f"Edit({squeezer_home}/.env) in {squeezer_home}",
+    ]
+
+
 def load_settings():
     if not GLOBAL_SETTINGS.exists():
         return {}
@@ -77,6 +89,12 @@ def sync(config_path: Path):
             if rule not in auto_mode["hard_deny"]:
                 auto_mode["hard_deny"].append(rule)
                 changed = True
+
+    squeezer_home_str = str(_config.squeezer_home())
+    for rule in squeezer_home_rules(squeezer_home_str):
+        if rule not in auto_mode["hard_deny"]:
+            auto_mode["hard_deny"].append(rule)
+            changed = True
 
     if changed:
         save_settings(settings)
