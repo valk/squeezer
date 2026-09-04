@@ -186,6 +186,31 @@ point it at a scratch `SQUEEZER_HOME` via `monkeypatch.setenv`):
   it once expired; the overlay's content never includes `hard_deny` or
   `soft_deny` keys.
 
+## Empirical verification: the overlay mechanism actually works
+
+Before shipping, this was checked directly rather than assumed (2026-09-04,
+Claude Code v2.1.260): a scratch `--settings` overlay containing only
+`{"autoMode": {"allow": ["$defaults", "<distinctive marker>"]}}` was passed
+to `claude --settings <overlay> auto-mode config` alongside this machine's
+real `~/.claude/settings.json` (which already carries deltasharpe's
+project-specific `hard_deny`/`allow` entries via `automode_sync.py`). Result:
+
+- The overlay's marker string appeared in the effective `allow` list
+  (count went from 20 to 21) — confirming a `--settings`-supplied
+  `autoMode.allow` block genuinely is read and merged by the classifier
+  config, not silently ignored.
+- The effective `hard_deny` list was byte-for-byte unchanged (still 13
+  entries), and every one of deltasharpe's existing hard_deny rules
+  (force-push, `rm -rf`, prod docker/ansible, `.env` read/write) was still
+  present. An `allow`-only overlay does not replace or widen `hard_deny` —
+  it merges additively, exactly as this feature's entire safety argument
+  requires.
+
+This resolves the one scenario that could have turned this feature from
+"ineffective" into "actively dangerous" (a `--settings` overlay silently
+replacing the whole `autoMode` block, wiping `hard_deny` during elevation).
+It doesn't.
+
 ## Open risks, stated plainly
 
 - This is influence over a judgment-based classifier, not a deterministic
