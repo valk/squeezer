@@ -6,6 +6,9 @@ testing logic modules directly and leaving thin process/glue code (formerly
 bin/orchestrator.py, bin/telegram_bridge.py — neither had tests) uncovered."""
 import importlib.util
 import json
+import queue
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -387,3 +390,81 @@ def test_classify_lockdown_command():
 
 def test_classify_ordinary_text_still_message_after_elevate_added():
     assert daemon_mod.classify_command("elevate my mood please") == daemon_mod.TelegramCommand.MESSAGE
+
+
+# --- _handle_telegram_message: /elevate and /lockdown wiring ---
+#
+# telegram_lib.send_message is stubbed in every test below so no real
+# Telegram API call is made; since it's stubbed, `cfg` is never actually
+# used for anything but being forwarded into that stub, so a plain None
+# stands in for a real telegram_lib.TelegramConfig().
+
+def test_elevate_locked_out_rejects_without_verifying(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    now = time.time()
+    locked_state = {"last_used_step": None, "failed_attempts": [], "locked_until": now + 900}
+    daemon_mod.save_totp_state(locked_state)
+
+    daemon_mod._handle_telegram_message(
+        "/elevate 123456 8", None, queue.Queue(), threading.Event()
+    )
+
+    after = daemon_mod.load_totp_state()
+    # unchanged: the lockout check short-circuited before verify_code/
+    # record_failed_attempt were ever reached.
+    assert after["failed_attempts"] == []
+    assert after["locked_until"] == locked_state["locked_until"]
+    assert after["last_used_step"] is None
+    assert daemon_mod.load_elevation_state()["expires_at"] is None
+
+
+def test_elevate_failed_verify_persists_failed_attempt(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.setenv("TOTP_SECRET", daemon_mod.totp.generate_secret())
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    before = daemon_mod.load_totp_state()
+    assert before["failed_attempts"] == []
+
+    daemon_mod._handle_telegram_message(
+        "/elevate 000000 8", None, queue.Queue(), threading.Event()
+    )
+
+    after = daemon_mod.load_totp_state()
+    assert len(after["failed_attempts"]) == len(before["failed_attempts"]) + 1
+    assert daemon_mod.load_elevation_state()["expires_at"] is None
+
+
+def test_elevate_success_persists_last_used_step_and_creates_elevation(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    secret = daemon_mod.totp.generate_secret()
+    monkeypatch.setenv("TOTP_SECRET", secret)
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    now = time.time()
+    code = daemon_mod.totp.totp_at_step(secret, daemon_mod.totp.current_step(now))
+
+    daemon_mod._handle_telegram_message(
+        f"/elevate {code} 8", None, queue.Queue(), threading.Event()
+    )
+
+    totp_state = daemon_mod.load_totp_state()
+    assert totp_state["last_used_step"] is not None
+
+    elevation = daemon_mod.load_elevation_state()
+    assert elevation["expires_at"] is not None
+    expires_at = datetime.fromisoformat(elevation["expires_at"])
+    expected = datetime.now(timezone.utc) + timedelta(hours=8)
+    assert abs((expires_at - expected).total_seconds()) < 60
+
+
+def test_lockdown_clears_elevation(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    future_iso = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    daemon_mod.save_elevation_state({"expires_at": future_iso})
+
+    daemon_mod._handle_telegram_message(
+        "/lockdown", None, queue.Queue(), threading.Event()
+    )
+
+    assert daemon_mod.load_elevation_state() == {"expires_at": None}
