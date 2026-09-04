@@ -11,7 +11,8 @@ hack. Four threads, coordinated only through SQUEEZER_HOME's state files and
 one in-process work queue:
 
   - telegram_poll_loop: long-polls Telegram, handles /pause /resume /auto
-    /manual directly, and queues everything else as work for the worker.
+    /manual /elevate /lockdown directly, and queues everything else as work
+    for the worker.
   - pacing_loop: decides, once per tick, whether fully-automatic or
     human-in-loop mode wants a continuation turn or a "what next" prompt
     right now (see daemon/human_in_loop.py for the mode's own branching).
@@ -264,7 +265,7 @@ def current_elevation_overlay_path(now: datetime | None = None) -> str | None:
         return None
     try:
         expires_at = datetime.fromisoformat(expires_at_iso)
-    except ValueError:
+    except (ValueError, TypeError):
         return None  # malformed state — fail safe, treat as no active elevation
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -273,7 +274,7 @@ def current_elevation_overlay_path(now: datetime | None = None) -> str | None:
     if now >= expires_at:
         return None
     overlay_path = _state_path("elevation_overlay.json")
-    overlay_path.write_text(json.dumps(totp.build_elevation_overlay(expires_at_iso), indent=2) + "\n")
+    _config.atomic_write_text(overlay_path, json.dumps(totp.build_elevation_overlay(expires_at_iso), indent=2) + "\n")
     return str(overlay_path)
 
 
@@ -634,15 +635,17 @@ def _handle_telegram_message(
             telegram_lib.send_message("Invalid or expired code.", cfg)
             return
         totp_state["last_used_step"] = matched_step
+        totp_state["failed_attempts"] = []
         save_totp_state(totp_state)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=hours)
         expires_at_iso = expires_at.isoformat()
         save_elevation_state({"expires_at": expires_at_iso})
         log(f"ELEVATE granted until {expires_at_iso}")
         telegram_lib.send_message(
-            f"Elevated until {expires_at_iso} — soft-deny protections (deploys, pushes, etc.) "
-            "may be crossed with your explicit authorization. hard_deny and all credential/"
-            "sandbox protections remain fully in force. Send /lockdown to end this early.",
+            f"Elevated until {expires_at_iso} — soft-deny-class actions your auto-mode config "
+            "allows crossing with explicit authorization may now proceed. Anything in hard_deny "
+            "— including squeezer's baseline deploy/force-push/rm -rf protections — remains "
+            "completely untouched. Send /lockdown to end this early.",
             cfg,
         )
         return
@@ -650,7 +653,9 @@ def _handle_telegram_message(
     if command == TelegramCommand.LOCKDOWN:
         save_elevation_state({"expires_at": None})
         log("LOCKDOWN: elevation ended")
-        telegram_lib.send_message("Elevation ended.", cfg)
+        telegram_lib.send_message(
+            "Elevation ended — a turn already running keeps its authorization until it finishes.", cfg
+        )
         return
 
     # Ordinary message. If we're waiting on a human-in-loop reply, this is

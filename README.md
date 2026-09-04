@@ -170,6 +170,17 @@ See `templates/ESCALATION_POLICY.md.template` (copied to
 `SQUEEZER_HOME/ESCALATION_POLICY.md` on setup) for what the agent handles
 autonomously vs. what it escalates to you over Telegram.
 
+### 2FA-gated elevation
+
+Send `/elevate <6-digit code> <hours>` (hours: 2, 4, 8, or 24) to temporarily
+widen what the daemon can do unattended — it layers a scoped authorization
+onto the next turn so auto-mode's classifier can cross `soft_deny`-class
+restrictions with your explicit consent. `hard_deny` and every credential/
+sandbox protection stay completely untouched, no matter what. `/lockdown`
+ends an active elevation immediately. Run `/squeezer:2fa-setup` once to
+enroll a TOTP secret (Google Authenticator or any compatible app) before
+using either command.
+
 ## Contributing
 
 Issues and PRs welcome — especially reports of escalation-policy edge cases

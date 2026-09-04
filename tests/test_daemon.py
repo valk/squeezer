@@ -362,6 +362,18 @@ def test_current_elevation_overlay_path_none_when_expires_at_malformed(tmp_path,
     assert daemon_mod.current_elevation_overlay_path(now=now) is None
 
 
+def test_current_elevation_overlay_path_none_when_expires_at_not_a_string(tmp_path, monkeypatch):
+    """A non-string expires_at (e.g. a hand-edited {"expires_at": 12345})
+    raises TypeError from datetime.fromisoformat, not ValueError — must
+    still fail safe rather than propagate uncaught out of spawn_claude
+    (whose only try/except wraps subprocess.run, not this call) into
+    worker_loop, which would otherwise permanently kill the worker thread."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    daemon_mod.save_elevation_state({"expires_at": 12345})
+    now = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert daemon_mod.current_elevation_overlay_path(now=now) is None
+
+
 def test_current_elevation_overlay_path_active_with_naive_now(tmp_path, monkeypatch):
     """A naive (no tzinfo) now must be normalized to UTC and compared
     correctly against a tz-aware active expires_at."""
@@ -473,6 +485,28 @@ def test_elevate_success_persists_last_used_step_and_creates_elevation(tmp_path,
     expires_at = datetime.fromisoformat(elevation["expires_at"])
     expected = datetime.now(timezone.utc) + timedelta(hours=8)
     assert abs((expires_at - expected).total_seconds()) < 60
+
+
+def test_elevate_success_clears_prior_failed_attempts(tmp_path, monkeypatch):
+    """Regression: a user who fails a few times then succeeds shouldn't
+    carry those accrued failed_attempts forward — they could otherwise tip
+    a later, unrelated mistake into a lockout shortly after a proven-
+    successful auth."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    secret = daemon_mod.totp.generate_secret()
+    monkeypatch.setenv("TOTP_SECRET", secret)
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    now = time.time()
+    daemon_mod.save_totp_state(
+        {"last_used_step": None, "failed_attempts": [now, now], "locked_until": None}
+    )
+    code = daemon_mod.totp.totp_at_step(secret, daemon_mod.totp.current_step(now))
+
+    daemon_mod._handle_telegram_message(
+        f"/elevate {code} 8", None, queue.Queue(), threading.Event()
+    )
+
+    assert daemon_mod.load_totp_state()["failed_attempts"] == []
 
 
 def test_lockdown_clears_elevation(tmp_path, monkeypatch):
