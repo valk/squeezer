@@ -26,7 +26,21 @@ replace it). Use the Bash tool for each step.
    add it to Google Authenticator (or any TOTP app) via manual key entry —
    paste the secret in, algorithm SHA1, 6 digits, 30-second period (Google
    Authenticator's defaults already match this).
-6. Ask the user to read back the current 6-digit code from their
+6. Also generate a scannable QR code and send it to the user with
+   SendUserFile, since scanning is faster and less error-prone than manual
+   key entry:
+   - Ensure the QR library is installed:
+     `python3 -c "import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/daemon'); import qr; r = qr.ensure_qrcode_installed(sys.executable); import json; print(json.dumps(r))"`
+   - If that reports `"ok": false`, skip this step silently and rely on the
+     secret/URI text from step 5 — this is a convenience, not a requirement,
+     so a failed install (e.g. no network) shouldn't block enrollment.
+   - Otherwise render the PNG to a fresh temp path (reading the secret back
+     from `.env` again, not from the conversation) and print that path:
+     `python3 -c "import sys, tempfile; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/daemon'); import config, totp, qr; secret = config.load_env()['TOTP_SECRET']; path = tempfile.mktemp(suffix='.png', prefix='squeezer_2fa_qr_'); qr.generate_qr_png(totp.provisioning_uri(secret), path); print(path)"`
+     Then call `SendUserFile` with that path, `status: "normal"`,
+     `display: "render"`, and a caption like "Scan this with your
+     authenticator app to enroll squeezer's 2FA secret."
+7. Ask the user to read back the current 6-digit code from their
    authenticator app, then confirm it verifies — again reading the secret
    back from `$SQUEEZER_HOME/.env` rather than interpolating it, with only
    the user-given code passed through directly:
@@ -34,5 +48,5 @@ replace it). Use the Bash tool for each step.
    If this prints `False`, the code was wrong or the secret was mistyped
    into the app — ask the user to re-check and try again rather than
    silently continuing.
-7. Once confirmed, tell the user 2FA is active and they can now send
+8. Once confirmed, tell the user 2FA is active and they can now send
    `/elevate <code> <hours>` (hours: 2, 4, 8, or 24) over Telegram.
