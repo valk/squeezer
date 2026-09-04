@@ -435,6 +435,24 @@ def test_elevate_failed_verify_persists_failed_attempt(tmp_path, monkeypatch):
     assert daemon_mod.load_elevation_state()["expires_at"] is None
 
 
+def test_elevate_failed_verify_preserves_last_used_step(tmp_path, monkeypatch):
+    """Regression: totp.record_failed_attempt only returns failed_attempts/
+    locked_until (last_used_step is a separate concern it was never meant to
+    carry) — saving its return value directly would silently drop
+    last_used_step from persisted state, resetting replay protection after
+    every failed /elevate attempt."""
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.setenv("TOTP_SECRET", daemon_mod.totp.generate_secret())
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda *a, **k: None)
+    daemon_mod.save_totp_state({"last_used_step": 12345, "failed_attempts": [], "locked_until": None})
+
+    daemon_mod._handle_telegram_message(
+        "/elevate 000000 8", None, queue.Queue(), threading.Event()
+    )
+
+    assert daemon_mod.load_totp_state()["last_used_step"] == 12345
+
+
 def test_elevate_success_persists_last_used_step_and_creates_elevation(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     secret = daemon_mod.totp.generate_secret()

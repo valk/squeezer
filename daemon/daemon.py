@@ -628,7 +628,8 @@ def _handle_telegram_message(
             return
         ok, matched_step = totp.verify_code(secret, code, totp_state.get("last_used_step"), now)
         if not ok:
-            save_totp_state(totp.record_failed_attempt(totp_state, now))
+            totp_state.update(totp.record_failed_attempt(totp_state, now))
+            save_totp_state(totp_state)
             log("ELEVATE rejected: invalid code")
             telegram_lib.send_message("Invalid or expired code.", cfg)
             return
