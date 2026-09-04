@@ -103,10 +103,40 @@ def is_within_no_reserve_hours(now: time | None = None) -> bool:
 
 def load_reserve_percent() -> float:
     """Returns 0 during the configured no_reserve_hours window, since no
-    reserve is needed then."""
+    reserve is needed then. A temporary human-approved override
+    (state["reserve_override_percent"], set via the `override-reserve` CLI
+    — see cmd_override_reserve) takes priority over both the
+    no_reserve_hours check and config.json's static value, for the
+    remainder of the current window only: roll_window() clears it on every
+    window reset, so an "extend it for now" grant never silently persists
+    into a future window the human never agreed to. Lower means more
+    budget for squeezer (same direction as reserve_percent always has) —
+    e.g. overriding the default 20% down to 0% removes the reserve
+    entirely for the rest of this window."""
+    state = load_state()
+    if state.get("reserve_override_percent") is not None:
+        return state["reserve_override_percent"]
     if is_within_no_reserve_hours():
         return 0
     return _config.load_config().get("reserve_percent", 20)
+
+
+def cmd_override_reserve(new_percent: float):
+    """`usage_lib.py override-reserve <percent>` — meant to be run by a
+    spawned Claude turn, and only after a human has explicitly agreed (via
+    a Telegram reply) to free up more of the current window for squeezer to
+    keep working right now. Never invoked automatically; there's no
+    auto-approval path here, matching this project's existing
+    human-in-the-loop conventions (human_in_loop.parse_budget_cap,
+    daemon.py's `snooze` CLI). This is also the one Bash invocation
+    budget_guard.sh's cmd_check specifically allowlists even when the
+    reserve is already breached — see its own docstring for why that
+    allowlist has to exist at all (otherwise this call would be blocked by
+    the very reserve it's meant to lift, a chicken-and-egg deadlock)."""
+    state = load_state()
+    state["reserve_override_percent"] = new_percent
+    save_state(state)
+    print(f"reserve overridden to {new_percent}% for the rest of this window (clears automatically on the next window roll)")
 
 
 def load_weekly_state():
@@ -310,6 +340,33 @@ def _is_squeezer_cwd(cwd: str | None) -> bool:
         return False
 
 
+_OVERRIDE_RESERVE_COMMAND_RE = re.compile(r"^python3\s+\S*usage_lib\.py\s+override-reserve\s+[\d.]+\s*$")
+
+
+def _is_budget_exempt(tool_name: str, tool_input: dict) -> bool:
+    """Tool calls that stay allowed even once the reserve is breached — a
+    narrow, explicit allowlist, not a general escape hatch. Two cases:
+
+    1. `telegram_send` (matched by suffix since the real tool name is
+       plugin-namespaced, e.g. `mcp__plugin_squeezer_squeezer-telegram__
+       telegram_send`) — so a fully-squeezed turn can still answer "what's
+       the status" instead of going completely silent. This hook only
+       decides whether the call is *allowed*; what the agent actually
+       sends is governed by CLAUDE.md's operating policy (status-only,
+       no other tool calls), not enforced here.
+    2. The exact `usage_lib.py override-reserve <percent>` Bash invocation
+       — see cmd_override_reserve's docstring for why this needs to be
+       allowlisted rather than left to the normal gate (a chicken-and-egg
+       deadlock otherwise: that call would itself be blocked by the very
+       reserve it exists to lift)."""
+    if tool_name.endswith("telegram_send"):
+        return True
+    if tool_name == "Bash":
+        command = (tool_input.get("command") or "").strip()
+        return bool(_OVERRIDE_RESERVE_COMMAND_RE.match(command))
+    return False
+
+
 def cmd_check():
     """Read a PreToolUse hook payload from stdin, block only if the payload
     belongs to squeezer's own daemon-spawned turn AND the reserve is
@@ -340,6 +397,8 @@ def cmd_check():
     maybe_roll_window()
     payload = json.load(sys.stdin)
     transcript_path = payload.get("transcript_path")
+    tool_name = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input") or {}
     is_squeezer_turn = _is_squeezer_cwd(payload.get("cwd"))
     state = load_state()
 
@@ -353,8 +412,15 @@ def cmd_check():
             state["last_known_human_transcript_path"] = transcript_path
         save_state(state)
 
-    if is_squeezer_turn and transcript_path and not budget_ok(transcript_path):
+    if (
+        is_squeezer_turn
+        and transcript_path
+        and not budget_ok(transcript_path)
+        and not _is_budget_exempt(tool_name, tool_input)
+    ):
         used = sum_usage_since(transcript_path, state["window_start_ts"])
+        window_start = datetime.fromisoformat(state["window_start_ts"])
+        next_window_at = (window_start + WINDOW_PERIOD).astimezone().strftime("%H:%M %Z")
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -362,8 +428,14 @@ def cmd_check():
                 "permissionDecisionReason": (
                     f"Token budget reserve ({load_reserve_percent()}%) reached for this window "
                     f"({used}/{state['estimated_window_total']} est. tokens used, estimate last "
-                    f"calibrated against /usage). Going idle until the window resets or a human "
-                    f"takes over. If /usage disagrees with this, recalibrate: "
+                    f"calibrated against /usage). Next window opens ~{next_window_at}. Going idle "
+                    f"until then or until a human overrides the reserve. If asked for status via "
+                    f"Telegram, reply with this info only (telegram_send stays allowed even now) — "
+                    f"do not retry other tool calls, they'll keep being denied. If the human "
+                    f"explicitly agrees to free up more of this window, run exactly "
+                    f"`python3 daemon/usage_lib.py override-reserve <lower-percent>` (also "
+                    f"allowlisted) rather than assuming you can just continue. If /usage disagrees "
+                    f"with the numbers above, recalibrate: "
                     f"python3 daemon/usage_lib.py calibrate <percent-shown-by-/usage>"
                 ),
             }
@@ -550,6 +622,7 @@ def roll_window(final_transcript_path: str = None) -> dict:
             state["estimated_window_total"] = int(sum(state["past_window_totals"]) / len(state["past_window_totals"]))
     state["window_start_ts"] = now_iso()
     state["squeezer_transcript_paths"] = []
+    state.pop("reserve_override_percent", None)  # a per-window grant, never carries into the next one
     save_state(state)
     return {"window_start_ts": state["window_start_ts"], "estimated_window_total": state["estimated_window_total"]}
 
@@ -607,7 +680,7 @@ if __name__ == "__main__":
             "usage: usage_lib.py {check|roll-window [transcript_path]|status|"
             "calibrate <percent> [transcript_path]|"
             "calibrate-week <percent> <hours-until-reset>|self-calibrate|"
-            "smart-gate [project-name]|quiet-hours}",
+            "smart-gate [project-name]|quiet-hours|override-reserve <percent>}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -618,6 +691,11 @@ if __name__ == "__main__":
         cmd_roll_window(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "status":
         cmd_status()
+    elif cmd == "override-reserve":
+        if len(sys.argv) < 3:
+            print("usage: usage_lib.py override-reserve <percent>", file=sys.stderr)
+            sys.exit(1)
+        cmd_override_reserve(float(sys.argv[2]))
     elif cmd == "calibrate":
         if len(sys.argv) < 3:
             print("usage: usage_lib.py calibrate <percent-shown-by-/usage> [transcript_path]", file=sys.stderr)

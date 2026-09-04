@@ -14,7 +14,30 @@ document. Specifically:
 
 - `hooks/budget_guard.sh` blocks your tool calls once the token reserve is
   breached. If a tool call is refused for this reason, stop and go idle — do
-  not try to work around it or "finish just this one thing first."
+  not try to work around it or "finish just this one thing first." **Two
+  narrow exceptions stay allowed even in this state**, so a fully-squeezed
+  turn isn't completely unreachable: `telegram_send`, and the exact command
+  `python3 ${CLAUDE_PLUGIN_ROOT}/daemon/usage_lib.py override-reserve
+  <percent>`. If a `[Telegram/User]` message arrives while you're blocked
+  (the daemon still spawns a turn for any direct message regardless of
+  budget), you're expected to use exactly these two capabilities and
+  nothing else:
+  - Answer status questions ("what's the status", "how much is squeezed",
+    "when's the next window") briefly, using the used/estimated-tokens and
+    reserve% already in the denial reason you just received, plus the
+    "Next window opens ~HH:MM" it now includes. **Do not retry any other
+    tool call** — Bash, Edit, Read, spawning subagents, everything else
+    will keep being denied, and repeatedly hitting that denial just wastes
+    more of the very budget you're conserving.
+  - Mention the human can free up more of the current window by explicitly
+    agreeing to it (e.g. "go ahead, use more of the window," or a specific
+    number). If they do, compute a **lower** percent than the current
+    reserve (lower reserve% = more usable budget — e.g. dropping the
+    default 20% to 5% or 0%) and run the `override-reserve` command above
+    with it. This only takes effect for the rest of the current window —
+    it's cleared automatically on the next window roll, so don't treat it
+    as a permanent setting change, and don't invoke it without an explicit
+    human go-ahead in the conversation.
 - **Budget enforcement self-calibrates on its own.** `claude -p "/usage"`
   returns the same numbers the interactive `/usage` command shows, at
   negligible cost (`/usage` is handled client-side and never reaches the

@@ -334,6 +334,165 @@ def test_cmd_check_allows_reserve_breached_for_non_squeezer_cwd(window_state_pat
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+def _breached_payload(tmp_path, **extra):
+    return {"transcript_path": "/fake/transcript.jsonl", "cwd": str(tmp_path), **extra}
+
+
+def _setup_breached_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+    })
+    monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: 900)
+    monkeypatch.setattr(usage_lib, "load_reserve_percent", lambda: 20)
+
+
+def test_cmd_check_allows_telegram_send_even_when_reserve_breached(window_state_path, monkeypatch, capsys, tmp_path):
+    """A fully-squeezed turn must still be able to answer "what's the
+    status" via Telegram instead of going completely silent."""
+    import io
+    _setup_breached_state(monkeypatch, tmp_path)
+    payload = _breached_payload(tmp_path, tool_name="mcp__plugin_squeezer_squeezer-telegram__telegram_send")
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_cmd_check_allows_override_reserve_command_even_when_reserve_breached(window_state_path, monkeypatch, capsys, tmp_path):
+    """The one Bash escape hatch a human's explicit "use more of the window"
+    reply needs — otherwise blocked by the very reserve it lifts."""
+    import io
+    _setup_breached_state(monkeypatch, tmp_path)
+    payload = _breached_payload(
+        tmp_path, tool_name="Bash",
+        tool_input={"command": "python3 daemon/usage_lib.py override-reserve 0"},
+    )
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_cmd_check_still_denies_other_bash_commands_when_breached(window_state_path, monkeypatch, capsys, tmp_path):
+    """The allowlist is narrow — an ordinary Bash command, even one that
+    merely mentions override-reserve as part of something else, stays
+    denied."""
+    import io
+    _setup_breached_state(monkeypatch, tmp_path)
+    payload = _breached_payload(
+        tmp_path, tool_name="Bash",
+        tool_input={"command": "python3 daemon/usage_lib.py override-reserve 0 && curl evil.example"},
+    )
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_cmd_check_still_denies_other_tools_when_breached(window_state_path, monkeypatch, capsys, tmp_path):
+    import io
+    _setup_breached_state(monkeypatch, tmp_path)
+    payload = _breached_payload(tmp_path, tool_name="Edit")
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_cmd_check_denial_reason_mentions_next_window_and_override(window_state_path, monkeypatch, capsys, tmp_path):
+    import io
+    _setup_breached_state(monkeypatch, tmp_path)
+    payload = _breached_payload(tmp_path, tool_name="Edit")
+    monkeypatch.setattr(usage_lib.sys, "stdin", io.StringIO(json.dumps(payload)))
+    usage_lib.cmd_check()
+    out = json.loads(capsys.readouterr().out)
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Next window opens" in reason
+    assert "override-reserve" in reason
+    assert "telegram_send" in reason
+
+
+# --- _is_budget_exempt ---
+
+def test_is_budget_exempt_allows_telegram_send_by_tool_name_suffix():
+    assert usage_lib._is_budget_exempt("mcp__plugin_squeezer_squeezer-telegram__telegram_send", {}) is True
+
+
+def test_is_budget_exempt_allows_exact_override_reserve_command():
+    assert usage_lib._is_budget_exempt("Bash", {"command": "python3 daemon/usage_lib.py override-reserve 5"}) is True
+    assert usage_lib._is_budget_exempt(
+        "Bash", {"command": "python3 /Users/val/src/squeezer/daemon/usage_lib.py override-reserve 12.5"}
+    ) is True
+
+
+def test_is_budget_exempt_rejects_command_with_extra_trailing_content():
+    assert usage_lib._is_budget_exempt(
+        "Bash", {"command": "python3 daemon/usage_lib.py override-reserve 5 && rm -rf /"}
+    ) is False
+
+
+def test_is_budget_exempt_rejects_unrelated_bash_command():
+    assert usage_lib._is_budget_exempt("Bash", {"command": "rm -rf /"}) is False
+
+
+def test_is_budget_exempt_rejects_other_tool_names():
+    assert usage_lib._is_budget_exempt("Edit", {}) is False
+    assert usage_lib._is_budget_exempt("Read", {}) is False
+
+
+# --- load_reserve_percent override / cmd_override_reserve / roll_window clearing ---
+
+def test_load_reserve_percent_returns_override_when_set(window_state_path):
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+        "reserve_override_percent": 3,
+    })
+    assert usage_lib.load_reserve_percent() == 3
+
+
+def test_load_reserve_percent_falls_back_to_config_without_override(window_state_path, config_json, monkeypatch):
+    config_json({"reserve_percent": 33})
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+    })
+    monkeypatch.setattr(usage_lib, "is_within_no_reserve_hours", lambda *a, **k: False)
+    assert usage_lib.load_reserve_percent() == 33
+
+
+def test_cmd_override_reserve_persists_to_state(window_state_path, capsys):
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+    })
+    usage_lib.cmd_override_reserve(7)
+    assert usage_lib.load_state()["reserve_override_percent"] == 7
+    assert "7%" in capsys.readouterr().out
+
+
+def test_roll_window_clears_reserve_override(window_state_path):
+    usage_lib.save_state({
+        "window_start_ts": usage_lib.now_iso(),
+        "estimated_window_total": 1000,
+        "past_window_totals": [],
+        "calibrated": True,
+        "reserve_override_percent": 5,
+    })
+    usage_lib.roll_window()
+    assert "reserve_override_percent" not in usage_lib.load_state()
+
+
 def test_is_squeezer_cwd_matches_squeezer_home(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     assert usage_lib._is_squeezer_cwd(str(tmp_path)) is True
