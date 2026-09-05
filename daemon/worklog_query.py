@@ -14,6 +14,7 @@ construction, and there is no ranker to tune or parser edge case to drop
 an entry. See the design doc for the measurement behind that decision:
 planning/2026-09-05-worklog-decision-retrieval-design.md
 """
+import subprocess
 import sys
 from pathlib import Path
 
@@ -75,3 +76,35 @@ def build_prompt(question: str, worklog: str) -> str:
         question=question,
         worklog=worklog,
     )
+
+
+def synthesize(prompt: str, timeout: int = 120) -> dict:
+    """Run the prompt through `claude -p`. Follows
+    usage_lib.self_calibrate's contract: never raises, always returns a
+    dict with "ok" set — a missing or broken `claude` binary degrades to a
+    message rather than a traceback.
+
+    Unlike daemon.py's spawn_claude this deliberately does NOT --resume the
+    orchestration session or --add-dir any project: a human asking a
+    question must never perturb in-flight work.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return {"ok": False, "error": f"claude -p failed to run: {e}"}
+
+    if proc.returncode != 0:
+        return {"ok": False, "error": f"claude -p exited {proc.returncode}: {proc.stderr.strip()}"}
+
+    return {"ok": True, "answer": proc.stdout.strip()}
+
+
+def answer(question: str) -> dict:
+    """Full path: read the worklog, ask, return {"ok", "answer"|"error"}."""
+    worklog = read_worklog()
+    if worklog is None:
+        return {"ok": False, "error": "no worklog yet — SQUEEZER_HOME/state/worklog.md is missing or empty"}
+    return synthesize(build_prompt(question, worklog))
