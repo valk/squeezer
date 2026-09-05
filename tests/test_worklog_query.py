@@ -66,3 +66,70 @@ def test_build_prompt_says_so_when_truncated(wq):
 def test_build_prompt_does_not_mention_truncation_when_whole(wq):
     prompt = wq.build_prompt("why?", "## 2026-08-27\n\n- Short log.\n")
     assert "truncated" not in prompt.lower()
+
+
+import subprocess
+
+
+class _FakeCompleted:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_synthesize_returns_answer_on_success(wq, monkeypatch):
+    monkeypatch.setattr(
+        wq.subprocess, "run", lambda *a, **k: _FakeCompleted(stdout="Because of the cutoff.\n")
+    )
+    result = wq.synthesize("prompt")
+    assert result["ok"] is True
+    assert result["answer"] == "Because of the cutoff."
+
+
+def test_synthesize_never_raises_on_timeout(wq, monkeypatch):
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=120)
+
+    monkeypatch.setattr(wq.subprocess, "run", _boom)
+    result = wq.synthesize("prompt")
+    assert result["ok"] is False
+    assert "error" in result
+
+
+def test_synthesize_never_raises_when_binary_missing(wq, monkeypatch):
+    def _boom(*a, **k):
+        raise FileNotFoundError("no such file or directory: 'claude'")
+
+    monkeypatch.setattr(wq.subprocess, "run", _boom)
+    result = wq.synthesize("prompt")
+    assert result["ok"] is False
+    assert "error" in result
+
+
+def test_synthesize_reports_nonzero_exit(wq, monkeypatch):
+    monkeypatch.setattr(
+        wq.subprocess, "run", lambda *a, **k: _FakeCompleted(stdout="", returncode=1)
+    )
+    result = wq.synthesize("prompt")
+    assert result["ok"] is False
+
+
+def test_answer_reports_missing_worklog_without_calling_claude(wq, monkeypatch):
+    """No worklog means no question to answer — and crucially, no tokens
+    spent finding that out."""
+    calls = []
+    monkeypatch.setattr(wq.subprocess, "run", lambda *a, **k: calls.append(a))
+    result = wq.answer("why?")
+    assert result["ok"] is False
+    assert calls == []
+
+
+def test_answer_returns_synthesis_result(wq, tmp_path, monkeypatch):
+    _write_worklog(tmp_path, "## 2026-08-27\n\n- Chose acme because it was cheaper.\n")
+    monkeypatch.setattr(
+        wq.subprocess, "run", lambda *a, **k: _FakeCompleted(stdout="Because it was cheaper.")
+    )
+    result = wq.answer("why acme?")
+    assert result["ok"] is True
+    assert result["answer"] == "Because it was cheaper."
