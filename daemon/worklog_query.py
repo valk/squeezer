@@ -61,7 +61,7 @@ def read_worklog() -> str | None:
     path = _config.state_dir() / "worklog.md"
     if not path.exists():
         return None
-    text = path.read_text()
+    text = path.read_text(errors="replace")
     return text if text.strip() else None
 
 

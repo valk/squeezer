@@ -4,6 +4,10 @@ Demo data for the worklog decision-retrieval feature. **This is not a real
 worklog.** Point `SQUEEZER_HOME` here to try the feature without touching a
 live squeezer install:
 
+**Read-only demo.** Never point a running daemon or `/squeezer:setup` at
+this directory — it is tracked in the public repo, and anything written
+here would be committed.
+
 ```
 SQUEEZER_HOME=retrieval-demo python3 daemon/worklog_query.py \
   "why does elevation use a --settings overlay instead of --dangerously-skip-permissions?"
