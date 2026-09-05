@@ -133,3 +133,19 @@ def test_answer_returns_synthesis_result(wq, tmp_path, monkeypatch):
     result = wq.answer("why acme?")
     assert result["ok"] is True
     assert result["answer"] == "Because it was cheaper."
+
+
+def test_main_prints_the_answer_and_exits_zero(wq, tmp_path, monkeypatch, capsys):
+    _write_worklog(tmp_path, "## 2026-08-27\n\n- Chose acme because it was cheaper.\n")
+    monkeypatch.setattr(
+        wq.subprocess, "run", lambda *a, **k: _FakeCompleted(stdout="Because it was cheaper.")
+    )
+    code = wq.main(["why acme?"])
+    assert code == 0
+    assert "Because it was cheaper." in capsys.readouterr().out
+
+
+def test_main_exits_nonzero_and_reports_the_error(wq, capsys):
+    code = wq.main(["why acme?"])
+    assert code == 1
+    assert "no worklog" in capsys.readouterr().err
