@@ -82,6 +82,57 @@ never touches your registered projects, secrets, or state.
 See `templates/CLAUDE.md.template` (copied to `SQUEEZER_HOME/CLAUDE.md` on
 setup) for the full operating policy a running instance follows.
 
+## Asking why
+
+`SQUEEZER_HOME/state/worklog.md` is the only durable record of *why* the
+orchestrator did what it did — which task it picked and on what grounds,
+what it escalated, what you replied over Telegram, what it deliberately
+chose not to do. After a few weeks that history is only answerable by
+opening a large file and reading it. The `/why` feature asks it a question
+in plain English and gets back the decision, the reasoning behind it, and
+the `## <date>` heading it came from.
+
+From the command line:
+
+```
+SQUEEZER_HOME=retrieval-demo python3 daemon/worklog_query.py \
+  "why does elevation use a --settings overlay instead of --dangerously-skip-permissions?"
+```
+
+runs against the placeholder worklog shipped in [`retrieval-demo/`](retrieval-demo)
+(never your real `SQUEEZER_HOME` — see its own README) and answers something
+like:
+
+```
+Elevation rejected `--dangerously-skip-permissions`: unscoped, bypasses tool
+sandboxing entirely — could read `~/.ssh/id_rsa` or overwrite `~/.zshrc`.
+Chose `--settings` overlay with `autoMode.allow` instead: scoped to lifting
+`soft_deny`-class actions only, never touches `~/.claude/settings.json`, no
+leak into human's interactive sessions. `hard_deny` stays untouched
+regardless — permanent floor, no runtime override.
+
+Citation: `## 2026-09-04 — Telegram TOTP elevation: why 2FA, and why this
+design specifically`
+```
+
+Against a real install, just drop `SQUEEZER_HOME=retrieval-demo` and ask
+about your own history. From Telegram, `/why <question>` does the same
+thing but is answered instantly — handled inline next to `/pause` and
+`/resume`, never queued behind a worker turn.
+
+**Limitations, stated plainly:**
+
+- **Answer quality is unmeasured and untested.** There's no labelled
+  question set and no accuracy check — nothing verifies the model read the
+  log correctly, so a confidently wrong citation is possible.
+- **Cost scales with the worklog, not the question.** Every query sends the
+  entire file to `claude -p`; a one-line question costs roughly as many
+  input tokens as the log is long, and that only grows over time.
+- **It can only surface reasoning that was actually written down.** If a
+  turn logged what it did without logging why, no query recovers the
+  reasoning that was never recorded.
+- Only tested on macOS.
+
 ## Human-in-loop mode
 
 Set `"mode": "human_in_loop"` in `config.json`, or send `/manual` to the bot
