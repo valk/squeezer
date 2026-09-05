@@ -39,6 +39,7 @@ import human_in_loop  # noqa: E402
 import telegram_lib  # noqa: E402
 import totp  # noqa: E402
 import usage_lib  # noqa: E402
+import worklog_query  # noqa: E402
 
 PACING_INTERVAL = 30  # seconds between pacing ticks
 SELF_CALIBRATE_INTERVAL = 20 * 60  # seconds, matches the old orchestrator's default
@@ -55,6 +56,7 @@ class TelegramCommand(str, Enum):
     MANUAL = "manual"
     ELEVATE = "elevate"
     LOCKDOWN = "lockdown"
+    WHY = "why"
     MESSAGE = "message"
 
 
@@ -72,6 +74,8 @@ def classify_command(text: str) -> TelegramCommand:
         return TelegramCommand.ELEVATE
     if stripped == "/lockdown":
         return TelegramCommand.LOCKDOWN
+    if stripped.startswith("/why"):
+        return TelegramCommand.WHY
     return TelegramCommand.MESSAGE
 
 
@@ -656,6 +660,28 @@ def _handle_telegram_message(
         telegram_lib.send_message(
             "Elevation ended — a turn already running keeps its authorization until it finishes.", cfg
         )
+        return
+
+    if command == TelegramCommand.WHY:
+        question = text.strip()[len("/why"):].strip()
+        if not question:
+            telegram_lib.send_message("Ask me a question — e.g. /why did we pick acme?", cfg)
+            return
+
+        # Answered on a throwaway thread: telegram_poll_loop is a single
+        # thread, and a synchronous 10-30s synthesis here would block the
+        # bot from even seeing /pause for the duration. Never queued —
+        # asking a question must not perturb in-flight work.
+        def _answer_and_reply():
+            result = worklog_query.answer(question)
+            reply = result["answer"] if result["ok"] else f"Couldn't answer: {result['error']}"
+            try:
+                telegram_lib.send_message(reply, cfg)
+            except Exception as e:  # noqa: BLE001 - a failed reply must not kill the thread
+                log(f"could not send /why reply: {e}")
+
+        log(f"answering /why: {question!r}")
+        threading.Thread(target=_answer_and_reply, daemon=True).start()
         return
 
     # Ordinary message. If we're waiting on a human-in-loop reply, this is
