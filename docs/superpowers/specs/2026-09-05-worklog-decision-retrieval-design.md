@@ -52,27 +52,25 @@ so on five counts:
    `/pause` and `/resume`, rather than queued behind a turn that may run up
    to `CLAUDE_SPAWN_TIMEOUT`.
 2. **Bounded cost.** One focused `claude -p` carrying only the selected
-   candidate entries — no `--resume` of the long-lived orchestration
-   session, no `--add-dir` project mounts, no growth in the prompt as the
-   worklog grows.
+   worklog — no `--resume` of the long-lived orchestration session, whose
+   accumulated context dwarfs the worklog, and no `--add-dir` project
+   mounts. The prompt does grow with the worklog; see "Open risks."
 3. **Non-perturbing.** Asking a question never consumes the orchestration
    session's context and never interleaves with the worker queue, so it
    cannot disturb in-flight work.
-4. **Citable and deterministic where it counts.** Retrieval is pure Python
-   and unit-tested; every answer names the `## date` and bullet index it
-   came from. The generic path cites nothing and is reproducible only by
-   chance.
+4. **Citable.** Every answer names the `## date` heading it came from, and
+   the prompt forbids answering without one. The generic path cites nothing.
 5. **Standalone.** The CLI runs with no daemon, no Telegram credentials, and
    no MCP wiring — which is what makes it reproducible by someone who has
    only cloned the repo.
 
 ## Non-goals
 
-- No embeddings, no vector store, no index to maintain. The corpus is 55KB
-  (~14k tokens) over 16 days and grows at roughly 3.4KB/day; the entire
-  history fits in a single context window today and will for about a year.
-  Vector search here would be ceremony, not engineering. See "When to
-  revisit" below for the trigger that would change this.
+- No embeddings, no vector store, no index to maintain.
+- **No ranking or selection layer at all.** The whole worklog goes into the
+  prompt. See "Why there is no retrieval layer" below — this is the single
+  biggest simplification in the design and it was made after measuring, not
+  assumed.
 - No change to how the worklog is written. Decisions are identified at read
   time, not tagged at write time.
 - No new dependency. The repo is stdlib-only with no `requirements.txt` or
@@ -93,58 +91,52 @@ to search it. Read-time extraction works on every entry ever written,
 including all of the current file, and costs nothing if the convention later
 changes.
 
-## Retrieval: recall-oriented by design
+## Why there is no retrieval layer
 
-The central design constraint is a vocabulary gap. A user asks "why did we
-drop the old provider?" while the worklog says "replace the vendor as a data
-source before the subscription cutoff". The content words barely overlap.
-For *why* questions this is the normal case, not the edge case: the question
-is asked in the user's vocabulary and the log is written in the work's.
+The first version of this design had one: an entry parser, inverse-document-
+frequency-weighted term overlap, a decision-marker boost, a recency
+tiebreak, and token-budgeted selection with a minimum-entry floor. All of it
+was cut before implementation. The reasoning is recorded here because the
+cut is the most important decision in the design.
 
-Therefore the ranker's job is **not** to find the answer. Its job is to
-narrow the corpus to something prompt-sized without losing the answer, and
-let the model do the semantic matching downstream. A confident,
-precision-tuned lexical ranker is actively harmful here, because its
-confident mistake is dropping the one entry that held the reasoning.
+The motivating constraint was real. There is a genuine vocabulary gap: a
+user asks "why did we drop the old provider?" while the worklog says
+"replace the vendor as a data source before the subscription cutoff." The
+content words barely overlap, which is the normal case for *why* questions —
+they are asked in the user's vocabulary while the log is written in the
+work's. That argued for a recall-oriented ranker whose job was to narrow the
+corpus without losing the answer, since a precision-tuned lexical ranker's
+characteristic failure is confidently dropping the one entry that held the
+reasoning.
 
-Scoring, per entry:
+Then the corpus was measured: **55,241 bytes, roughly 13.8k tokens, against
+a 200k-token context window.** The entire history fits in a single prompt
+with an order of magnitude to spare. Every component above existed to solve
+a problem the numbers say does not exist — and each one could only make
+recall *worse* than sending everything, never better. A ranker that selects
+6k tokens out of 13.8k is not an optimization; it is a way to lose 60% of
+the corpus in exchange for a token saving nobody needs on a hand-triggered
+query.
 
-- **Weighted term overlap.** Lowercase, strip stopwords and interrogatives
-  (*why*, *did*, *we*, *the*), crude suffix stemming. Terms are weighted by
-  inverse document frequency computed over the worklog itself, so a term
-  appearing in most entries contributes almost nothing while a rare one
-  dominates.
-- **Decision-marker boost.** A small additive bump for entries containing
-  causal or decisional language: *because*, *rather than*, *instead of*,
-  *decided*, *chose*, *opted*, *judged*, *per ESCALATION_POLICY*, *replied*,
-  *proceed with*. Kept deliberately small so it breaks ties rather than
-  dominating — otherwise every escalation note outranks the actual answer.
-- **Recency tiebreak.** Slight preference for newer entries, since decisions
-  get revisited and superseded.
+So the whole worklog goes into the prompt, and the model does all of the
+semantic matching. Recall is 100% by construction. There is no ranker to
+tune, no scoring function to regress, and no parser edge case (wrapped
+continuation lines, indented sub-bullets, malformed headings) that can drop
+an entry, because nothing is ever selecting between entries.
 
-Selection takes entries in score order until a token budget fills, subject
-to a **floor**: entries keep being added until the budget is reached, but at
-least `MIN_ENTRIES` are always included even when every score is zero. That
-floor is the recall guarantee — a query sharing no vocabulary with the log
-must still return candidates rather than nothing. Selected entries enter the
-prompt in chronological order with their dates attached.
-
-Two module-level constants, tunable in one place: `TOKEN_BUDGET = 6000` and
-`MIN_ENTRIES = 15`. Token count is estimated as characters divided by four
-rather than measured with a tokenizer — adding a tokenizer dependency to
-approximate a budget that is itself a round guess would be false precision,
-and the budget only needs to keep the prompt an order of magnitude below the
-context limit. `MIN_ENTRIES` may exceed `TOKEN_BUDGET` for unusually long
-entries; the floor wins, because returning too much beats returning nothing.
-
-Two cheap precision knobs are available when the user already knows roughly
-where to look: `--since <date>` and `--project <name>`.
+The one guard retained is a size ceiling: if the worklog ever exceeds
+`MAX_WORKLOG_CHARS`, the **tail** is kept — the most recent history, which
+is where decisions relevant to a current question overwhelmingly live — and
+the prompt is told the log was truncated so the model can say so rather than
+silently answering from a partial record. At the current growth rate of
+~3.4KB/day that ceiling is years away. It exists so the failure mode is a
+stated truncation instead of a confusing context-limit error.
 
 ## Synthesis
 
-A single `claude -p` subprocess receives the selected entries and a prompt
+A single `claude -p` subprocess receives the worklog and a prompt
 instructing it to identify the decision and the reasoning behind it, to cite
-the `## date` and bullet index, to prefer the **latest** decision when
+the `## date` heading it came from, to prefer the **latest** decision when
 several conflict and say so explicitly if an earlier one was reversed, and
 to answer "not found in the worklog" rather than speculate when the
 reasoning genuinely is not recorded.
@@ -179,14 +171,11 @@ but it is real and is stated here rather than glossed.
 **New module: `daemon/worklog_query.py`.** Stdlib only, following the
 existing `daemon/*.py` convention (importable, testable via importlib,
 resolving paths through `daemon/config.py` so `SQUEEZER_HOME` overrides
-work). Responsibilities: parse entries, rank them, select within budget,
-build the prompt, invoke synthesis, format the cited answer.
+work). Four small functions: read the worklog, build the prompt, invoke
+synthesis, and one `answer()` that composes them.
 
-**CLI.** A `__main__` entry point in that module. `--no-llm` prints the
-ranked entries with no synthesis step at all — simultaneously the
-deterministic fallback when `claude` is unavailable, the seam that keeps
-tests free of subprocess calls, and an honest demonstration of what
-retrieval alone produces before the model is involved.
+**CLI.** A `__main__` entry point in that module, taking the question as its
+argument.
 
 **Telegram.** `TelegramCommand` gains `WHY`; `classify_command` matches
 `/why …`; `_handle_telegram_message` handles it inline before the ordinary
@@ -199,10 +188,10 @@ short-lived thread, keeping the poll loop responsive. This mirrors the
 existing instant-command expectation that Telegram control never waits on
 work.
 
-**Refactor in scope.** `hud_status._last_insight()` moves onto the shared
-parser rather than keeping its own `^## ` split. Its existing tests
-(`tests/test_hud_status.py`) are the regression net proving behavior is
-unchanged. This is the only refactor included; nothing else is touched.
+**No refactor in scope.** An earlier draft moved
+`hud_status._last_insight()` onto a shared entry parser. With no parser
+left, there is nothing to share, and touching working code for its own sake
+is not worth the regression risk. `hud_status.py` is untouched.
 
 ## Testing
 
@@ -212,26 +201,25 @@ placeholder names (`acme`, `example-project`) only — never real project
 names, paths, or usernames, per this repo's public-repo policy in
 `CLAUDE.md`.
 
-The deterministic core is what gets covered:
+Cutting the ranker cut most of the test surface with it — there is no
+scoring function to pin and no parser edge case to cover. What remains:
 
-- **Parser.** Multi-day file yields the expected entries and dates; wrapped
-  continuation lines attach to their bullet rather than starting a new
-  entry; indented sub-bullets attach to their parent; a missing file, an
-  empty file, and a file with no `## ` headings each degrade quietly.
-- **Ranking.** A rare term outranks a common one; an entry with
-  decision-marker language beats a bland mention of the same terms; recency
-  breaks ties. Critically: **a zero-overlap query still returns the floor
-  N**, pinning the recall guarantee against future tuning.
-- **Selection.** Token budget respected; floor honored; output ordered
-  chronologically.
+- **Prompt construction.** The built prompt contains the question and the
+  worklog text.
+- **Truncation.** A worklog over `MAX_WORKLOG_CHARS` keeps the **tail**, not
+  the head, and the prompt says it was truncated. This is the one piece of
+  non-obvious logic in the module, and getting it backwards would silently
+  discard the most recent history — exactly the entries most likely to hold
+  the answer.
 - **Synthesis contract.** Never raises. Subprocess failure, timeout, and
   non-zero exit each return a structured error.
   `tests/test_usage_lib.py` already monkeypatches `subprocess.TimeoutExpired`
   and is the pattern to follow.
-- **Integration properties.** `--no-llm` makes zero subprocess calls
-  (asserted, not assumed). `/why …` classifies as `WHY` and puts **nothing**
-  on the work queue — this assertion is what pins the "instant,
-  non-perturbing" property so a later refactor cannot quietly regress it.
+- **Missing worklog.** No file, or an empty one, produces a clear message
+  rather than a traceback or an empty prompt sent to the model.
+- **Telegram wiring.** `/why …` classifies as `WHY` and puts **nothing** on
+  the work queue — this assertion is what pins the "instant, non-perturbing"
+  property so a later refactor cannot quietly regress it.
 
 Explicitly not tested: answer quality from the real model. It is
 non-deterministic and costs tokens on every run. One hand-checked question
@@ -240,14 +228,15 @@ papered over with a brittle assertion.
 
 ## Open risks, stated plainly
 
-- **Retrieval quality is unmeasured.** There is no labelled question set and
-  no recall metric. The floor guarantees candidates are returned; nothing
-  guarantees the right entry is among them. For a corpus this size the
-  practical risk is low, and it grows with the corpus.
-- **The decision-marker list is hand-tuned.** It encodes the vocabulary of
-  one worklog written under one operating policy. It will generalize
-  imperfectly to a worklog written differently, and there is no mechanism
-  that notices when it stops working.
+- **Answer quality is unmeasured.** There is no labelled question set and no
+  accuracy metric. Recall is 100% by construction — the whole log is in the
+  prompt — but nothing verifies the model reads it correctly, and a
+  confidently wrong citation is the failure mode to watch for.
+- **Cost scales with the corpus, not the question.** Every query sends the
+  entire worklog, so a one-line question costs ~14k input tokens today and
+  more as the log grows. Prompt caching is not exploited. This is the
+  deliberate price of deleting the ranker, and it is the first thing to
+  revisit if query volume ever rises.
 - **Answer quality depends on the worklog being honest.** If a turn recorded
   what it did without recording why, no retrieval strategy recovers the
   reasoning. The feature surfaces what was written; it cannot surface what
@@ -262,10 +251,23 @@ papered over with a brittle assertion.
 
 ## When to revisit
 
-The lexical approach should be replaced when recall degrades, not when the
-file gets large — those are different thresholds. Parsing and ranking 1MB is
-milliseconds, and the prompt stays constant size because only the selected
-entries are sent, so growth alone changes nothing. The real signal is
-queries returning candidate sets that plainly miss the relevant entry as
-more entries compete on the same common terms. That is the point at which
-BM25, or embeddings, finally earns the complexity it costs.
+Add a retrieval layer when one of two things is actually true, not before:
+
+1. **The worklog stops fitting comfortably in a prompt.** At ~3.4KB/day the
+   log reaches 200k tokens somewhere past the five-year mark, and
+   `MAX_WORKLOG_CHARS` truncation covers the interim by keeping the most
+   recent history. This threshold is far away and easy to observe.
+2. **Per-query cost starts to matter** — many queries a day, or a much
+   larger log, turning ~14k input tokens per question into a real number.
+   The cheapest fix at that point is prompt caching over a stable log
+   prefix, not a ranker.
+
+Note which threshold is *absent* from that list: file size alone. A 1MB
+worklog reads and concatenates in milliseconds; size only matters through
+its effect on the prompt. Conflating "the file is big" with "we need
+retrieval" is what produced the over-built first draft of this design.
+
+When a ranker does become necessary, the first draft's approach — recall-
+oriented lexical scoring with a decision-marker boost, deliberately never
+precision-tuned — is recorded above and is the place to start. BM25 and
+embeddings come after that, if it proves insufficient.
