@@ -6,6 +6,6 @@ todos/*/
 todos/TODO.md
 .claude/settings.local.json
 __pycache__/
-state/
+/state/
 *.pyc
 .pytest_cache/
