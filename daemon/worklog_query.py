@@ -14,6 +14,7 @@ construction, and there is no ranker to tune or parser edge case to drop
 an entry. See the design doc for the measurement behind that decision:
 planning/2026-09-05-worklog-decision-retrieval-design.md
 """
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -108,3 +109,22 @@ def answer(question: str) -> dict:
     if worklog is None:
         return {"ok": False, "error": "no worklog yet — SQUEEZER_HOME/state/worklog.md is missing or empty"}
     return synthesize(build_prompt(question, worklog))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Ask squeezer's worklog why a past decision was made."
+    )
+    parser.add_argument("question", help='e.g. "why did we drop the old provider?"')
+    args = parser.parse_args(argv)
+
+    result = answer(args.question)
+    if not result["ok"]:
+        print(result["error"], file=sys.stderr)
+        return 1
+    print(result["answer"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
