@@ -673,12 +673,16 @@ def _handle_telegram_message(
         # bot from even seeing /pause for the duration. Never queued —
         # asking a question must not perturb in-flight work.
         def _answer_and_reply():
-            result = worklog_query.answer(question)
-            reply = result["answer"] if result["ok"] else f"Couldn't answer: {result['error']}"
             try:
+                result = worklog_query.answer(question)
+                reply = result["answer"] if result["ok"] else f"Couldn't answer: {result['error']}"
                 telegram_lib.send_message(reply, cfg)
             except Exception as e:  # noqa: BLE001 - a failed reply must not kill the thread
-                log(f"could not send /why reply: {e}")
+                log(f"/why failed: {e}")
+                try:
+                    telegram_lib.send_message(f"Couldn't answer: {e}", cfg)
+                except Exception as e2:  # noqa: BLE001 - a failed reply must not kill the thread
+                    log(f"could not send /why error reply: {e2}")
 
         log(f"answering /why: {question!r}")
         threading.Thread(target=_answer_and_reply, daemon=True).start()
