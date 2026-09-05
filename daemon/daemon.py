@@ -100,7 +100,7 @@ def compose_ack_message(busy: bool) -> str:
     immediate response regardless of how busy the worker is."""
     if busy:
         return "Got it — still finishing up the current turn, I'll get to this right after."
-    return "Got it — starting on this now."
+    return "Got it, on it!"
 
 
 def open_todo_summaries(todos_dir: Path, max_items: int = 5) -> list[str]:

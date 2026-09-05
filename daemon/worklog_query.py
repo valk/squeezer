@@ -22,9 +22,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import config as _config
 
-# ponytail: whole-log-in-prompt has a ceiling; at ~3.4KB/day this is years
-# out. When it binds, prompt-cache a stable log prefix before reaching for
-# a ranker — see "When to revisit" in the design doc.
+# ponytail: whole-log-in-prompt has a ceiling. 400k chars is ~100k tokens,
+# comfortably under the context limit but well above the 55KB worklog this
+# was measured against. How long that lasts depends entirely on how much
+# the instance writes — at that log's ~3.4KB/day it is roughly a year, at
+# 10x that it is about a month. When it binds, prompt-cache a stable log
+# prefix before reaching for a ranker — see "When to revisit" in the design
+# doc.
 MAX_WORKLOG_CHARS = 400_000
 
 _PROMPT_TEMPLATE = """\
