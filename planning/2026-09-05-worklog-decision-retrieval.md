@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library only (`subprocess`, `argparse`, `threading`, `pathlib`). pytest for tests. No new dependencies — the repo has no `requirements.txt` or `pyproject.toml` and stays that way.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-worklog-decision-retrieval-design.md`
+**Spec:** `planning/2026-09-05-worklog-decision-retrieval-design.md`
 
 ## Global Constraints
 
@@ -134,7 +134,7 @@ against a 200k context window, so the whole file goes into the prompt and
 the model does all of the semantic matching — recall is 100% by
 construction, and there is no ranker to tune or parser edge case to drop
 an entry. See the design doc for the measurement behind that decision:
-docs/superpowers/specs/2026-09-05-worklog-decision-retrieval-design.md
+planning/2026-09-05-worklog-decision-retrieval-design.md
 """
 import sys
 from pathlib import Path
