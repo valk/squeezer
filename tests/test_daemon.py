@@ -520,3 +520,54 @@ def test_lockdown_clears_elevation(tmp_path, monkeypatch):
     )
 
     assert daemon_mod.load_elevation_state() == {"expires_at": None}
+
+
+# --- /why command ---
+
+def test_classify_command_recognizes_why():
+    assert daemon_mod.classify_command("/why did we pick acme?") == daemon_mod.TelegramCommand.WHY
+
+
+def test_classify_command_why_is_case_insensitive():
+    assert daemon_mod.classify_command("/WHY did we pick acme?") == daemon_mod.TelegramCommand.WHY
+
+
+def test_plain_question_is_still_an_ordinary_message():
+    """Only the explicit /why command takes the instant path — a bare
+    question still goes to the orchestration turn as before."""
+    assert daemon_mod.classify_command("why did we pick acme?") == daemon_mod.TelegramCommand.MESSAGE
+
+
+def test_why_command_never_reaches_the_work_queue(monkeypatch):
+    """The whole point of the instant path: asking a question must not
+    queue work behind a possibly-long-running turn, and must not perturb
+    the orchestration session."""
+    sent = []
+    monkeypatch.setattr(
+        daemon_mod.telegram_lib, "send_message", lambda text, cfg=None, **k: sent.append(text)
+    )
+    monkeypatch.setattr(
+        daemon_mod.worklog_query, "answer", lambda q: {"ok": True, "answer": "Because of the cutoff."}
+    )
+
+    work_queue = queue.Queue()
+    before = set(threading.enumerate())
+    daemon_mod._handle_telegram_message("/why did we pick acme?", None, work_queue, threading.Event())
+    for thread in set(threading.enumerate()) - before:
+        thread.join(timeout=5)
+
+    assert work_queue.empty()
+    assert any("Because of the cutoff." in text for text in sent)
+
+
+def test_why_command_with_no_question_asks_for_one(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        daemon_mod.telegram_lib, "send_message", lambda text, cfg=None, **k: sent.append(text)
+    )
+
+    work_queue = queue.Queue()
+    daemon_mod._handle_telegram_message("/why", None, work_queue, threading.Event())
+
+    assert work_queue.empty()
+    assert sent and "question" in sent[0].lower()
