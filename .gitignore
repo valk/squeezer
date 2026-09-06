@@ -9,3 +9,5 @@ __pycache__/
 /state/
 *.pyc
 .pytest_cache/
+.DS_Store
+
