@@ -87,6 +87,25 @@ def test_synthesize_returns_answer_on_success(wq, monkeypatch):
     assert result["answer"] == "Because of the cutoff."
 
 
+def test_synthesize_disables_tools(wq, monkeypatch):
+    """The worklog in the prompt must be the ONLY source of truth. With
+    tools enabled, claude -p can read files off disk (confirmed: it will
+    answer from an unrelated design doc in this repo, with no citation)
+    instead of the worklog actually in the prompt — silently breaking the
+    cite-a-date-or-say-not-found contract while still looking valid."""
+    captured = []
+
+    def _fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return _FakeCompleted(stdout="x")
+
+    monkeypatch.setattr(wq.subprocess, "run", _fake_run)
+    wq.synthesize("prompt")
+    cmd = captured[0]
+    assert "--tools" in cmd
+    assert cmd[cmd.index("--tools") + 1] == ""
+
+
 def test_synthesize_never_raises_on_timeout(wq, monkeypatch):
     def _boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=120)

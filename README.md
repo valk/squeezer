@@ -122,6 +122,11 @@ thing but is answered instantly — handled inline next to `/pause` and
 
 **Limitations, stated plainly:**
 
+- **`claude -p` runs with all tools disabled (`--tools ""`) on purpose.**
+  Found the hard way: with tools enabled, a query about squeezer's own
+  design once answered from a spec file on disk instead of the worklog
+  actually in the prompt — correct-sounding, uncited, and silently wrong
+  source. Disabling tools makes the worklog the only thing it can see.
 - **Answer quality is unmeasured and untested.** There's no labelled
   question set and no accuracy check — nothing verifies the model read the
   log correctly, so a confidently wrong citation is possible.
@@ -131,7 +136,34 @@ thing but is answered instantly — handled inline next to `/pause` and
 - **It can only surface reasoning that was actually written down.** If a
   turn logged what it did without logging why, no query recovers the
   reasoning that was never recorded.
+- **Very long worklogs answer only about recent history.** Above
+  `MAX_WORKLOG_CHARS` (400,000 characters) the log is truncated to its most
+  recent portion before being sent, so questions about older decisions stop
+  being answerable. The answer says when this happened rather than quietly
+  replying from a partial record. How long that takes depends entirely on
+  how much the instance writes — the worklog this was measured against grew
+  ~3.4KB/day, which is roughly a year; a busier one gets there far sooner.
 - Only tested on macOS.
+
+### What was cut
+
+The first design for this was a real retrieval pipeline: an entry parser,
+inverse-document-frequency-weighted term scoring, a decision-marker boost, a
+recency tiebreak, and token-budgeted selection with a minimum-entry floor.
+
+It was all cut before any code was written, after measuring the corpus —
+about 13.8k tokens against a 200k-token context window. The whole worklog
+fits in one prompt, so every one of those components could only make recall
+*worse* than sending everything, in exchange for a token saving nobody needs
+on a hand-triggered query. What shipped instead reads the file and asks the
+question, and recall is 100% by construction because nothing selects between
+entries.
+
+That cut is the main trade-off in this feature, and it is what the
+truncation and cost limitations above are the price of. The reasoning, the
+measurement, and the two thresholds that would justify building the ranker
+after all are recorded in
+[`planning/`](planning/2026-09-05-worklog-decision-retrieval-design.md).
 
 ## Human-in-loop mode
 

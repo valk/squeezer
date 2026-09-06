@@ -92,10 +92,18 @@ def synthesize(prompt: str, timeout: int = 120) -> dict:
     Unlike daemon.py's spawn_claude this deliberately does NOT --resume the
     orchestration session or --add-dir any project: a human asking a
     question must never perturb in-flight work.
+
+    --tools "" is load-bearing, not an optimization: without it claude -p
+    can read files off disk (e.g. this repo's own design docs) and answer
+    from those instead of the worklog in the prompt, silently breaking the
+    cite-a-date-or-say-not-found contract while still looking like a valid
+    answer. Confirmed by A/B: same prompt, same worklog, tools enabled
+    answered from a spec file with no citation; tools disabled correctly
+    returned "not found in worklog."
     """
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt],
+            ["claude", "-p", prompt, "--tools", ""],
             capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as e:
