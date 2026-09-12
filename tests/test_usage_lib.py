@@ -672,6 +672,23 @@ def test_cmd_roll_window_resets_squeezer_transcript_paths(window_state_path, cap
     assert usage_lib.load_state()["squeezer_transcript_paths"] == []
 
 
+def test_roll_window_never_collapses_estimate_to_zero(window_state_path, monkeypatch):
+    """An all-idle run of windows must not zero out estimated_window_total
+    — that would permanently zero budget_ok's threshold (blocking every
+    squeezer call regardless of real usage, un-liftable by override-reserve)
+    and crash hud_status with a ZeroDivisionError on every render."""
+    monkeypatch.setattr(usage_lib, "sum_usage_since", lambda path, ts: 0)  # this window was idle too
+    usage_lib.save_state({
+        "window_start_ts": "2026-08-27T00:00:00+00:00",
+        "estimated_window_total": 1000,
+        "past_window_totals": [0, 0, 0],
+        "calibrated": True,
+        "squeezer_transcript_paths": [],
+    })
+    result = usage_lib.roll_window(final_transcript_path="/fake/idle.jsonl")
+    assert result["estimated_window_total"] == 1000
+
+
 def test_roll_window_returns_new_state(window_state_path):
     usage_lib.save_state({
         "window_start_ts": "2026-08-27T00:00:00+00:00",

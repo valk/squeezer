@@ -619,7 +619,15 @@ def roll_window(final_transcript_path: str = None) -> dict:
         state["past_window_totals"].append(final_total)
         state["past_window_totals"] = state["past_window_totals"][-10:]  # keep recent history
         if state["past_window_totals"]:
-            state["estimated_window_total"] = int(sum(state["past_window_totals"]) / len(state["past_window_totals"]))
+            # A run of idle (0-usage) windows can average to exactly 0 — never
+            # adopt that: it zeroes budget_ok's threshold permanently (blocks
+            # every squeezer call regardless of real usage, and override-reserve
+            # can't lift it since 0 * any reserve% is still 0) and crashes every
+            # hud_status render with a literal ZeroDivisionError. Keep the prior
+            # estimate instead of collapsing to a degenerate 0.
+            avg = int(sum(state["past_window_totals"]) / len(state["past_window_totals"]))
+            if avg > 0:
+                state["estimated_window_total"] = avg
     state["window_start_ts"] = now_iso()
     state["squeezer_transcript_paths"] = []
     state.pop("reserve_override_percent", None)  # a per-window grant, never carries into the next one
