@@ -44,13 +44,29 @@ def test_build_status_line_includes_all_ranked_fragments():
         last_insight="fixed the flaky test",
     )
     assert "auto" in line
-    assert "squeezed: 30%" in line
-    assert "user: 6%" in line
+    assert "squeezed 30%" in line
+    assert "6% user" in line
     assert "max: 80% of the 5h window" in line
     assert "total: 16%" in line
     assert "█" in line and "░" in line
     assert "5 open, 1 blocked (2 projects)" in line
     assert "fixed the flaky test" in line
+
+
+def test_build_status_line_orders_squeezed_bar_user_before_mode():
+    """squeezed%, the bar, and user% render as one unbroken group (no ·
+    separators between them) right after the emoji, with the mode/paused
+    fragment following it rather than leading the line."""
+    line = hud_status.build_status_line(
+        mode="auto", paused=True,
+        squeezer_window_percent=10.0, human_window_percent=6.0,
+        squeezer_budget_percent=30.0, squeezer_budget_of_window_percent=80.0,
+        open_count=0, blocked_count=0, project_count=0, last_insight=None,
+        color=False,
+    )
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, color=False)
+    assert f"squeezed 30% {bar} 6% user" in line
+    assert line.index("6% user") < line.index("auto·paused")
 
 
 def test_build_status_line_shows_paused():
@@ -74,8 +90,8 @@ def test_build_status_line_shows_zero_usage_bar_when_uncalibrated():
         squeezer_budget_percent=None, squeezer_budget_of_window_percent=None,
         open_count=1, blocked_count=0, project_count=1, last_insight=None,
     )
-    assert "squeezed: 0%" in line
-    assert "user: 0%" in line
+    assert "squeezed 0%" in line
+    assert "0% user" in line
     assert "max: 0% of the 5h window" in line
     assert "total: 0%" in line
 
@@ -133,23 +149,27 @@ def test_allocate_chars_handles_zero_shares():
 # --- _context_bar: the four-zone squeeze/headroom/user/tail bar ---
 
 def test_context_bar_renders_at_exact_width():
-    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20)
-    assert hud_status._visible_len(bar) == 20
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0)
+    assert hud_status._visible_len(bar) == 10
+
+
+def test_context_bar_default_width_is_ten():
+    assert hud_status._CONTEXT_BAR_WIDTH == 10
 
 
 def test_context_bar_color_false_has_no_ansi_escapes():
     """Telegram renders plain text and mangles raw ANSI escapes into
     literal garbage rather than interpreting them (the bug this guards
     against), so color=False must emit none."""
-    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20, color=False)
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, color=False)
     assert "\x1b" not in bar
-    assert hud_status._visible_len(bar) == 20
+    assert hud_status._visible_len(bar) == 10
 
 
 def test_context_bar_color_false_still_distinguishes_all_four_zones():
     """Without color, the four zones must stay visually distinct by glyph
     alone, or the bar collapses into an ambiguous wall of blocks."""
-    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20, color=False)
+    bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, color=False)
     assert len(set(bar)) == 4
 
 
@@ -163,7 +183,7 @@ def test_build_status_line_color_false_has_no_ansi_escapes():
         color=False,
     )
     assert "\x1b" not in line
-    assert "squeezed: 30%" in line
+    assert "squeezed 30%" in line
 
 
 def test_build_status_line_color_false_truncates_without_trailing_escape():
@@ -181,8 +201,11 @@ def test_build_status_line_color_false_truncates_without_trailing_escape():
 
 
 def test_context_bar_zone_widths_match_percentages():
+    """Zones print in pivot order: squeezer's headroom, then its solid
+    usage (hugging the pivot from the left), then the human's solid usage
+    (hugging the same pivot from the right), then the tail."""
     bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20)
-    assert _bar_zone_widths(bar) == [2, 14, 1, 3]
+    assert _bar_zone_widths(bar) == [14, 2, 1, 3]
 
 
 def test_context_bar_squeezer_zone_clamped_when_over_budget():
@@ -190,15 +213,17 @@ def test_context_bar_squeezer_zone_clamped_when_over_budget():
     > 100%, see _squeezer_usage_percents), the squeeze zone fills solid with
     zero headroom rather than overflowing into the human's zone."""
     bar = hud_status._context_bar(90.0, 5.0, 150.0, 80.0, width=20)
-    a, b, c, d = _bar_zone_widths(bar)
-    assert b == 0
-    assert a == 16  # 80% allowed max * 20 chars
-    assert a + b + c + d == 20
+    headroom, solid, human, tail = _bar_zone_widths(bar)
+    assert headroom == 0
+    assert solid == 16  # 80% allowed max * 20 chars
+    assert headroom + solid + human + tail == 20
 
 
 def test_context_bar_uses_squeeze_color_for_solid_zone():
+    """The squeeze-colored solid zone now sits second (after the dim-yellow
+    headroom zone that hugs the left edge), not first."""
     bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, width=20)
-    assert bar.startswith(hud_status._squeeze_color(30.0))
+    assert f"{hud_status._ANSI_RESET}{hud_status._squeeze_color(30.0)}" in bar
 
 
 # --- _squeeze_color: yellow -> green gradient toward the allowed max ---
@@ -293,8 +318,8 @@ def test_current_status_line_shows_squeezer_usage_bar(tmp_path, monkeypatch):
     line = hud_status.current_status_line()
     # squeezer_window=4%, human_window=6%; allowed max=(100-20)-6=74%=7400
     # tokens; 400/7400 ~= 5.4%; total=4+6=10%
-    assert "squeezed: 5%" in line
-    assert "user: 6%" in line
+    assert "squeezed 5%" in line
+    assert "6% user" in line
     assert "max: 74% of the 5h window" in line
     assert "total: 10%" in line
 
@@ -307,7 +332,7 @@ def test_current_status_line_shows_zero_percent_bar_when_squeezer_has_not_run_ye
 
     line = hud_status.current_status_line()
     # human_window=10%; allowed max = (100-20)-10 = 70% of the 5h window
-    assert "squeezed: 0%" in line
+    assert "squeezed 0%" in line
     assert "max: 70% of the 5h window" in line
 
 
@@ -322,7 +347,7 @@ def test_current_status_line_of_budget_reflects_no_reserve_hours(tmp_path, monke
 
     line = hud_status.current_status_line()
     # human_window=6%; allowed max = 100-6 = 94% = 9400 tokens; 400/9400 ~= 4.3%
-    assert "squeezed: 4%" in line
+    assert "squeezed 4%" in line
     assert "max: 94% of the 5h window" in line
 
 
@@ -338,9 +363,9 @@ def test_current_status_line_allowed_max_never_goes_below_zero(tmp_path, monkeyp
     _write_calibrated_state(tmp_path, total_used=9000, squeezer_used=0, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    assert "squeezed: 0%" in line
+    assert "squeezed 0%" in line
     assert "max: 0% of the 5h window" in line
-    assert "user: 90%" in line
+    assert "90% user" in line
     assert "total: 90%" in line
 
 
@@ -348,7 +373,7 @@ def test_current_status_line_squeezed_percent_clamped_to_100(tmp_path, monkeypat
     """If the human's own direct usage grows mid-window and shrinks squeezer's
     allowed maximum after squeezer already spent tokens against a larger one,
     the raw ratio (squeezer_used / allowed_max) can run over 100% — displayed
-    "squeezed: N%" must clamp to 100 rather than showing e.g. "108%", since a
+    "squeezed N%" must clamp to 100 rather than showing e.g. "108%", since a
     percentage reading over 100 looks like a bug rather than "over budget"."""
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)
@@ -358,7 +383,7 @@ def test_current_status_line_squeezed_percent_clamped_to_100(tmp_path, monkeypat
     _write_calibrated_state(tmp_path, total_used=8560, squeezer_used=7560, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    assert "squeezed: 100%" in line
+    assert "squeezed 100%" in line
     assert "max: 70% of the 5h window" in line
 
 
@@ -400,7 +425,7 @@ def test_budget_percent_correctly_sums_multiple_squeezer_turns(tmp_path, monkeyp
     line = hud_status.current_status_line()
     # squeezer_used=270 (2.7% of window), human_used=100 (1%); allowed max =
     # 80-1 = 79% = 7900 tokens; 270/7900 ~= 3.4%; total=2.7+1=3.7 -> "4%"
-    assert "squeezed: 3%" in line
+    assert "squeezed 3%" in line
     assert "max: 79% of the 5h window" in line
     assert "total: 4%" in line
 
@@ -409,7 +434,7 @@ def test_current_status_line_rolls_an_overdue_window_before_computing_percents(t
     """Regression: window rollover previously only ever happened on the
     daemon's own 20-minute self_calibrate_loop timer, so a statusLine render
     against a window left stale by a dead/missing daemon kept reporting
-    squeezer usage from an already-expired window (e.g. "squeezed: 11%"
+    squeezer usage from an already-expired window (e.g. "squeezed 11%"
     despite squeezer not having run any turn since). A render must self-heal
     an overdue window before computing anything against it, same as
     usage_lib.cmd_check now does."""
@@ -432,7 +457,7 @@ def test_current_status_line_rolls_an_overdue_window_before_computing_percents(t
 
     line = hud_status.current_status_line()
 
-    assert "squeezed: 0%" in line
+    assert "squeezed 0%" in line
     assert hud_status.usage_lib.load_state()["window_start_ts"] != stale_start
 
 
@@ -443,7 +468,7 @@ def test_current_status_line_shows_zero_usage_bar_when_uncalibrated(tmp_path, mo
     # default state from load_state() has calibrated=False
 
     line = hud_status.current_status_line()
-    assert "squeezed: 0%" in line
+    assert "squeezed 0%" in line
 
 
 def test_current_status_line_includes_latest_worklog_insight(tmp_path, monkeypatch):
@@ -541,8 +566,8 @@ def test_current_status_line_reconciles_total_to_real_five_hour_percent(tmp_path
     # estimated_total=10000, since no last_known_transcript_path is set here
     # for calibrate_window to succeed against); squeezed = 400/5840 ~= 7%
     assert "total: 36%" in line
-    assert "squeezed: 7%" in line
-    assert "user: 22%" in line
+    assert "squeezed 7%" in line
+    assert "22% user" in line
     assert "max: 58% of the 5h window" in line
 
 
@@ -557,7 +582,7 @@ def test_current_status_line_falls_back_to_estimate_without_real_percent(tmp_pat
 
     line = hud_status.current_status_line()
     assert "total: 10%" in line
-    assert "user: 6%" in line
+    assert "6% user" in line
 
 
 def test_current_status_line_recalibrates_estimated_window_total_from_real_percent(tmp_path, monkeypatch):

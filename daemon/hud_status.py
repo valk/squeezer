@@ -36,15 +36,21 @@ _BLOCKED_RE = re.compile(r"^\s*-\s*\[b\]", re.MULTILINE)
 # claude-hud's own Usage bar) — a single bar spanning 0-100% of the 5-hour
 # rolling token window (labeled "the 5h window" to stay plain and avoid
 # colliding with claude-hud's own "Usage"/"Context" bars — claude-hud's
-# "Context" is the unrelated current-session context-window fill), made of
-# four zones left to right:
-#   1. squeezer's own usage (solid, yellow -> green as it nears its cap)
-#   2. squeezer's remaining headroom within its allowed max (dim yellow
+# "Context" is the unrelated current-session context-window fill). Both
+# sides grow from the same pivot — the boundary between squeezer's
+# allowed max and the human's zone — rather than both growing left to
+# right, so the bar reads as two gauges pulling apart from one shared
+# point instead of two independent left-aligned bars:
+#   1. squeezer's remaining headroom within its allowed max (dim yellow
 #      dots) — this zone's width shrinks as the human's direct usage eats
 #      into the shared reserve, per _squeezer_usage_percents
-#   3. the human's own direct usage (solid blue)
+#   2. squeezer's own usage (solid, yellow -> green as it nears its cap) —
+#      hugs the pivot, growing right-to-left (toward the left edge) as
+#      usage grows
+#   3. the human's own direct usage (solid blue) — hugs the same pivot,
+#      growing left-to-right (toward the right edge) as usage grows
 #   4. whatever's left untouched by either (dim neutral dots)
-_CONTEXT_BAR_WIDTH = 20
+_CONTEXT_BAR_WIDTH = 10
 _ANSI_RESET = "\x1b[0m"
 _ANSI_DIM_YELLOW = "\x1b[2;33m"
 _ANSI_BRIGHT_BLUE = "\x1b[94m"
@@ -96,7 +102,12 @@ def _context_bar(
     """The four-zone bar described above. squeezer's solid zone is clamped
     to its own allowed max (budget_of_window_percent) so an over-budget
     of_budget_percent (>100%, see _squeezer_usage_percents) fills that zone
-    solid rather than overflowing into the human's zone.
+    solid rather than overflowing into the human's zone. squeezer's solid
+    zone sits immediately left of the pivot (the boundary between the
+    squeezer zone and the human zone) and its headroom fills the remaining
+    left side, so squeezer's fill grows right-to-left, hugging the pivot,
+    while the human's solid zone sits immediately right of the same pivot
+    and grows left-to-right.
 
     color=False (used for Telegram, which renders plain text and mangles
     raw ANSI escapes into literal garbage rather than interpreting them)
@@ -109,12 +120,12 @@ def _context_bar(
     human_solid = min(max(human_window_percent, 0.0), 100.0 - allowed)
     tail = max(0.0, 100.0 - allowed - human_solid)
 
-    a, b, c, d = _allocate_chars([squeezer_solid, squeezer_headroom, human_solid, tail], width)
+    b, a, c, d = _allocate_chars([squeezer_headroom, squeezer_solid, human_solid, tail], width)
     if not color:
-        return f"{'█' * a}{'▒' * b}{'▓' * c}{'░' * d}"
+        return f"{'▒' * b}{'█' * a}{'▓' * c}{'░' * d}"
     return (
-        f"{_squeeze_color(of_budget_percent)}{'█' * a}{_ANSI_RESET}"
         f"{_ANSI_DIM_YELLOW}{'░' * b}{_ANSI_RESET}"
+        f"{_squeeze_color(of_budget_percent)}{'█' * a}{_ANSI_RESET}"
         f"{_ANSI_BRIGHT_BLUE}{'█' * c}{_ANSI_RESET}"
         f"{_ANSI_DIM}{'░' * d}{_ANSI_RESET}"
     )
@@ -133,8 +144,7 @@ def _squeezer_usage_fragments(
         color=color,
     )
     return [
-        f"{bar} squeezed: {of_budget_percent:.0f}%",
-        f"user: {human_window_percent:.0f}%",
+        f"squeezed {of_budget_percent:.0f}% {bar} {human_window_percent:.0f}% user",
         f"max: {budget_of_window_percent:.0f}% of the 5h window",
         f"total: {(squeezer_window_percent + human_window_percent):.0f}%",
     ]
@@ -188,7 +198,7 @@ def build_status_line(
     width: int = 0,
     color: bool = True,
 ) -> str:
-    """Pure assembly of the ranked fragments (state -> squeezer's usage bar
+    """Pure assembly of the ranked fragments (squeezer's usage bar -> state
     -> TODOs -> insight), truncated to `width` columns if given (0/falsy =
     no limit). The four squeezer_*/human_* percents come as a set — either
     all None (uncalibrated window, same fail-open convention as the rest of
@@ -240,12 +250,12 @@ def build_status_line(
     (see _context_bar) — used for the Telegram header, since Telegram's
     plain-text messages don't interpret ANSI and would show the raw escape
     codes as garbage instead of a colored bar."""
-    parts = [_mode_fragment(mode, paused)]
-    parts.extend(_squeezer_usage_fragments(
+    parts = _squeezer_usage_fragments(
         squeezer_window_percent or 0.0, human_window_percent or 0.0,
         squeezer_budget_percent or 0.0, squeezer_budget_of_window_percent or 0.0,
         color=color,
-    ))
+    )
+    parts.insert(1, _mode_fragment(mode, paused))
     parts.append(_todo_fragment(open_count, blocked_count, project_count))
     if last_insight:
         parts.append(last_insight)
