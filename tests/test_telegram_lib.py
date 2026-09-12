@@ -149,11 +149,10 @@ def test_send_message_swallows_bot_status_update_failure(monkeypatch):
 
 def _bot_status_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
-    monkeypatch.setattr(telegram_lib.hud_status, "bot_title", lambda: "SQZR: ████░░░░")
     monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "squeezed: 18%, user: 16%")
 
 
-def test_update_bot_status_sets_name_and_creates_pinned_message(tmp_path, monkeypatch):
+def test_update_bot_status_creates_pinned_message(tmp_path, monkeypatch):
     _bot_status_env(tmp_path, monkeypatch)
     calls = []
 
@@ -168,23 +167,18 @@ def test_update_bot_status_sets_name_and_creates_pinned_message(tmp_path, monkey
     telegram_lib.update_bot_status(_cfg())
 
     methods = [c[0] for c in calls]
-    assert methods == ["setMyName", "sendMessage", "pinChatMessage"]
-    assert calls[0][1] == {"name": "SQZR: ████░░░░"}
-    assert calls[2][1]["message_id"] == 42
+    assert methods == ["sendMessage", "pinChatMessage"]
+    assert calls[1][1]["message_id"] == 42
 
     state = json.loads((tmp_path / "state" / "telegram_bot_status.json").read_text())
-    assert state == {
-        "title": "SQZR: ████░░░░", "description": "squeezed: 18%, user: 16%", "message_id": 42,
-    }
+    assert state == {"description": "squeezed: 18%, user: 16%", "message_id": 42}
 
 
 def test_update_bot_status_edits_existing_pinned_message(tmp_path, monkeypatch):
     _bot_status_env(tmp_path, monkeypatch)
     state_path = tmp_path / "state" / "telegram_bot_status.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({
-        "title": "SQZR: ████░░░░", "description": "squeezed: 10%, user: 16%", "message_id": 42,
-    }))
+    state_path.write_text(json.dumps({"description": "squeezed: 10%, user: 16%", "message_id": 42}))
     calls = []
     monkeypatch.setattr(
         telegram_lib, "_call_telegram",
@@ -193,7 +187,6 @@ def test_update_bot_status_edits_existing_pinned_message(tmp_path, monkeypatch):
 
     telegram_lib.update_bot_status(_cfg())
 
-    # title unchanged -> no setMyName; description changed -> edit, not recreate
     assert calls == [("editMessageText", {
         "chat_id": "111", "message_id": 42, "text": "squeezed: 18%, user: 16%",
     })]
@@ -203,9 +196,7 @@ def test_update_bot_status_skips_calls_when_nothing_changed(tmp_path, monkeypatc
     _bot_status_env(tmp_path, monkeypatch)
     state_path = tmp_path / "state" / "telegram_bot_status.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({
-        "title": "SQZR: ████░░░░", "description": "squeezed: 18%, user: 16%", "message_id": 42,
-    }))
+    state_path.write_text(json.dumps({"description": "squeezed: 18%, user: 16%", "message_id": 42}))
     calls = []
     monkeypatch.setattr(
         telegram_lib, "_call_telegram",

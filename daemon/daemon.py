@@ -669,7 +669,7 @@ def _handle_telegram_message(
 
     if command == TelegramCommand.STATUS:
         telegram_lib.send_message(
-            f"{hud_status.current_status_line(color=False)}\n\n(Also kept live in the bot's name and pinned message.)",
+            f"{hud_status.current_status_line(color=False)}\n\n(Also kept live in the pinned message.)",
             cfg,
         )
         return

@@ -594,7 +594,7 @@ def test_status_command_replies_with_hud_line_and_mentions_pinned_message(monkey
     daemon_mod._handle_telegram_message("/status", None, work_queue, threading.Event())
 
     assert work_queue.empty()
-    assert sent == ["🍋 hud line\n\n(Also kept live in the bot's name and pinned message.)"]
+    assert sent == ["🍋 hud line\n\n(Also kept live in the pinned message.)"]
 
 
 def test_status_command_never_reaches_the_work_queue(monkeypatch):

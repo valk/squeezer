@@ -33,10 +33,10 @@ class TelegramConfig:
 def send_message(text: str, cfg: TelegramConfig = None, timeout: int = 10) -> None:
     """Plain message send. The HUD status (mode/budget, TODO counts, latest
     worklog snippet) no longer rides along on every message — see
-    update_bot_status, which keeps it live in the bot's own display name and
-    a pinned message instead. Still nudges that update on every send so it
-    tracks state at least as fresh as whatever prompted this message,
-    without waiting for telegram_poll_loop's own tick."""
+    update_bot_status, which keeps it live in a pinned message instead.
+    Still nudges that update on every send so it tracks state at least as
+    fresh as whatever prompted this message, without waiting for
+    telegram_poll_loop's own tick."""
     cfg = cfg or TelegramConfig()
     data = urllib.parse.urlencode({"chat_id": cfg.allowed_chat_id, "text": text}).encode()
     req = urllib.request.Request(cfg.api_url("sendMessage"), data=data, method="POST")
@@ -59,7 +59,7 @@ def _load_bot_status_state() -> dict:
             return json.loads(path.read_text())
         except json.JSONDecodeError:
             pass  # corrupt/truncated (e.g. write interrupted mid-flight) — fall back to default below
-    return {"title": None, "description": None, "message_id": None}
+    return {"description": None, "message_id": None}
 
 
 def _save_bot_status_state(state: dict) -> None:
@@ -75,11 +75,9 @@ def _call_telegram(cfg: TelegramConfig, method: str, params: dict, timeout: int 
 
 def update_bot_status(cfg: TelegramConfig = None) -> None:
     """Keeps hud_status live and visible without it riding along on every
-    message body: the bot's own display name mirrors the usage bar
-    (setMyName — a global bot property, fine here since this is a
-    single-owner bot), and one pinned message in the allowed chat carries
-    the full details ("squeezed: N%, user: N%, ..." — see
-    hud_status.current_status_line). A real Telegram chat *description*
+    message body: one pinned message in the allowed chat carries the full
+    details ("squeezed: N%, user: N%, ..." — see hud_status.
+    current_status_line). A real Telegram chat *description*
     (setChatDescription) only works on groups/channels, not the private
     1:1 chat this bot's setup uses — a pinned message is the private-chat
     equivalent, and Bot API allows a bot to pin/edit its own messages there
@@ -87,19 +85,14 @@ def update_bot_status(cfg: TelegramConfig = None) -> None:
 
     Skips the API call entirely when the text hasn't changed since the last
     successful push (cached in state/telegram_bot_status.json) — avoids
-    hammering setMyName/editMessageText on every poll tick and message send
-    when nothing actually moved. Can raise (a network error, a malformed
+    hammering editMessageText on every poll tick and message send when
+    nothing actually moved. Can raise (a network error, a malformed
     response) — send_message swallows that itself, and telegram_poll_loop's
     own broad except-and-retry around its whole iteration covers this call
     too."""
     cfg = cfg or TelegramConfig()
-    title = hud_status.bot_title()
     description = hud_status.current_status_line(color=False)
     state = _load_bot_status_state()
-
-    if title != state.get("title"):
-        _call_telegram(cfg, "setMyName", {"name": title[:64]})
-        state["title"] = title
 
     if description != state.get("description"):
         message_id = state.get("message_id")
