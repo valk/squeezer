@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_mcp_deps  # noqa: E402
 import config as _config  # noqa: E402
+import hud_status  # noqa: E402
 import human_in_loop  # noqa: E402
 import telegram_lib  # noqa: E402
 import totp  # noqa: E402
@@ -57,6 +58,7 @@ class TelegramCommand(str, Enum):
     ELEVATE = "elevate"
     LOCKDOWN = "lockdown"
     WHY = "why"
+    STATUS = "status"
     MESSAGE = "message"
 
 
@@ -76,6 +78,8 @@ def classify_command(text: str) -> TelegramCommand:
         return TelegramCommand.LOCKDOWN
     if stripped.startswith("/why"):
         return TelegramCommand.WHY
+    if stripped == "/status":
+        return TelegramCommand.STATUS
     return TelegramCommand.MESSAGE
 
 
@@ -576,6 +580,7 @@ def telegram_poll_loop(work_queue: "queue.Queue[str]", stop_event: threading.Eve
             messages, offset = telegram_lib.get_updates(offset, cfg)
             for text in messages:
                 _handle_telegram_message(text, cfg, work_queue, busy_event)
+            telegram_lib.update_bot_status(cfg)  # every poll tick, even with no new messages
         except Exception as e:  # noqa: BLE001 - keep polling regardless
             log(f"error during telegram poll (will retry): {e}")
             time_mod.sleep(5)
@@ -659,6 +664,13 @@ def _handle_telegram_message(
         log("LOCKDOWN: elevation ended")
         telegram_lib.send_message(
             "Elevation ended — a turn already running keeps its authorization until it finishes.", cfg
+        )
+        return
+
+    if command == TelegramCommand.STATUS:
+        telegram_lib.send_message(
+            f"{hud_status.current_status_line(color=False)}\n\n(Also kept live in the bot's name and pinned message.)",
+            cfg,
         )
         return
 

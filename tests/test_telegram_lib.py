@@ -110,50 +110,108 @@ def _sent_text(captured):
     return urllib.parse.parse_qs(captured["request"].data.decode())["text"][0]
 
 
-def test_send_message_prepends_hud_status_line_by_default(monkeypatch):
+def test_send_message_sends_plain_text(monkeypatch):
+    """The HUD status header no longer rides along on every message body —
+    see update_bot_status, which keeps it live in the bot's name/pinned
+    message instead."""
     captured = _sent_request(monkeypatch)
-    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
+    monkeypatch.setattr(telegram_lib, "update_bot_status", lambda cfg: None)
 
     telegram_lib.send_message("hello", _cfg())
 
-    text = _sent_text(captured)
-    assert text.startswith("🍋 hud line\n\n")
-    assert text.endswith("hello")
+    assert _sent_text(captured) == "hello"
 
 
-def test_send_message_requests_plain_bar_since_telegram_cant_render_ansi(monkeypatch):
-    """Telegram sends plain text and mangles raw ANSI escapes into literal
-    garbage rather than interpreting them, so the HUD header must be built
-    with color=False."""
+def test_send_message_nudges_bot_status_update(monkeypatch):
     captured = _sent_request(monkeypatch)
     calls = []
-    monkeypatch.setattr(
-        telegram_lib.hud_status, "current_status_line",
-        lambda **kw: calls.append(kw) or "🍋 hud line",
-    )
+    monkeypatch.setattr(telegram_lib, "update_bot_status", lambda cfg: calls.append(cfg))
 
-    telegram_lib.send_message("hello", _cfg())
+    cfg = _cfg()
+    telegram_lib.send_message("hello", cfg)
 
-    assert calls == [{"color": False}]
+    assert calls == [cfg]
 
 
-def test_send_message_include_hud_false_skips_header(monkeypatch):
-    captured = _sent_request(monkeypatch)
-    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
-
-    telegram_lib.send_message("hello", _cfg(), include_hud=False)
-
-    assert _sent_text(captured) == "hello"
-
-
-def test_send_message_falls_back_to_plain_text_if_hud_status_errors(monkeypatch):
+def test_send_message_swallows_bot_status_update_failure(monkeypatch):
+    """A broken HUD/status push must not look like a failed message send."""
     captured = _sent_request(monkeypatch)
 
-    def boom(**kw):
+    def boom(cfg):
         raise RuntimeError("broken state file")
 
-    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", boom)
+    monkeypatch.setattr(telegram_lib, "update_bot_status", boom)
 
-    telegram_lib.send_message("hello", _cfg())
+    telegram_lib.send_message("hello", _cfg())  # must not raise
 
     assert _sent_text(captured) == "hello"
+
+
+def _bot_status_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    monkeypatch.setattr(telegram_lib.hud_status, "bot_title", lambda: "SQZR: ████░░░░")
+    monkeypatch.setattr(telegram_lib.hud_status, "current_status_line", lambda **kw: "squeezed: 18%, user: 16%")
+
+
+def test_update_bot_status_sets_name_and_creates_pinned_message(tmp_path, monkeypatch):
+    _bot_status_env(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_call(cfg, method, params, timeout=10):
+        calls.append((method, params))
+        if method == "sendMessage":
+            return {"result": {"message_id": 42}}
+        return {"ok": True}
+
+    monkeypatch.setattr(telegram_lib, "_call_telegram", fake_call)
+
+    telegram_lib.update_bot_status(_cfg())
+
+    methods = [c[0] for c in calls]
+    assert methods == ["setMyName", "sendMessage", "pinChatMessage"]
+    assert calls[0][1] == {"name": "SQZR: ████░░░░"}
+    assert calls[2][1]["message_id"] == 42
+
+    state = json.loads((tmp_path / "state" / "telegram_bot_status.json").read_text())
+    assert state == {
+        "title": "SQZR: ████░░░░", "description": "squeezed: 18%, user: 16%", "message_id": 42,
+    }
+
+
+def test_update_bot_status_edits_existing_pinned_message(tmp_path, monkeypatch):
+    _bot_status_env(tmp_path, monkeypatch)
+    state_path = tmp_path / "state" / "telegram_bot_status.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({
+        "title": "SQZR: ████░░░░", "description": "squeezed: 10%, user: 16%", "message_id": 42,
+    }))
+    calls = []
+    monkeypatch.setattr(
+        telegram_lib, "_call_telegram",
+        lambda cfg, method, params, timeout=10: calls.append((method, params)) or {"ok": True},
+    )
+
+    telegram_lib.update_bot_status(_cfg())
+
+    # title unchanged -> no setMyName; description changed -> edit, not recreate
+    assert calls == [("editMessageText", {
+        "chat_id": "111", "message_id": 42, "text": "squeezed: 18%, user: 16%",
+    })]
+
+
+def test_update_bot_status_skips_calls_when_nothing_changed(tmp_path, monkeypatch):
+    _bot_status_env(tmp_path, monkeypatch)
+    state_path = tmp_path / "state" / "telegram_bot_status.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({
+        "title": "SQZR: ████░░░░", "description": "squeezed: 18%, user: 16%", "message_id": 42,
+    }))
+    calls = []
+    monkeypatch.setattr(
+        telegram_lib, "_call_telegram",
+        lambda cfg, method, params, timeout=10: calls.append((method, params)) or {"ok": True},
+    )
+
+    telegram_lib.update_bot_status(_cfg())
+
+    assert calls == []

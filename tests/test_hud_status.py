@@ -299,6 +299,24 @@ def test_current_status_line_shows_squeezer_usage_bar(tmp_path, monkeypatch):
     assert "total: 10%" in line
 
 
+def test_bot_title_shows_plain_bar_when_calibrated(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
+
+    title = hud_status.bot_title()
+
+    assert title.startswith("SQZR: ")
+    assert hud_status._ANSI_RE.search(title) is None  # plain glyphs, no color escapes
+    assert len(title) <= 64  # Telegram's setMyName display-name cap
+
+
+def test_bot_title_falls_back_when_uncalibrated(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
+    # default state from load_state() has calibrated=False
+
+    assert hud_status.bot_title() == "SQZR"
+
+
 def test_current_status_line_shows_zero_percent_bar_when_squeezer_has_not_run_yet(tmp_path, monkeypatch):
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)

@@ -337,6 +337,21 @@ def _squeezer_usage_percents(
     return squeezer_window, human_window, of_budget, budget_of_window
 
 
+def bot_title() -> str:
+    """"SQZR: " + the plain-glyph usage bar alone (see _context_bar,
+    color=False — Telegram's bot display name is plain text same as its
+    messages), for telegram_lib.update_bot_status to push via setMyName.
+    Well under Telegram's 64-char display-name cap. "SQZR" alone (no bar)
+    if the window hasn't been calibrated yet, same fail-open convention as
+    _squeezer_usage_percents."""
+    usage_percents = _squeezer_usage_percents()
+    if not usage_percents:
+        return "SQZR"
+    squeezer_window, human_window, of_budget, budget_of_window = usage_percents
+    bar = _context_bar(squeezer_window, human_window, of_budget, budget_of_window, color=False)
+    return f"SQZR: {bar}"
+
+
 def _real_five_hour_percent_from_stdin() -> float | None:
     """Parses Claude Code's own statusLine JSON payload for
     rate_limits.five_hour.used_percentage — see _squeezer_usage_percents'

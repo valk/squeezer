@@ -571,3 +571,37 @@ def test_why_command_with_no_question_asks_for_one(monkeypatch):
 
     assert work_queue.empty()
     assert sent and "question" in sent[0].lower()
+
+
+# --- /status command ---
+
+def test_classify_command_recognizes_status():
+    assert daemon_mod.classify_command("/status") == daemon_mod.TelegramCommand.STATUS
+    assert daemon_mod.classify_command("  /STATUS  ") == daemon_mod.TelegramCommand.STATUS
+
+
+def test_status_command_replies_with_hud_line_and_mentions_pinned_message(monkeypatch):
+    """Per the switch to a live bot name/pinned message (see telegram_lib.
+    update_bot_status), the HUD line no longer rides along on every
+    message — /status is now the explicit way to ask for it."""
+    sent = []
+    monkeypatch.setattr(
+        daemon_mod.telegram_lib, "send_message", lambda text, cfg=None, **k: sent.append(text)
+    )
+    monkeypatch.setattr(daemon_mod.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
+
+    work_queue = queue.Queue()
+    daemon_mod._handle_telegram_message("/status", None, work_queue, threading.Event())
+
+    assert work_queue.empty()
+    assert sent == ["🍋 hud line\n\n(Also kept live in the bot's name and pinned message.)"]
+
+
+def test_status_command_never_reaches_the_work_queue(monkeypatch):
+    monkeypatch.setattr(daemon_mod.telegram_lib, "send_message", lambda text, cfg=None, **k: None)
+    monkeypatch.setattr(daemon_mod.hud_status, "current_status_line", lambda **kw: "🍋 hud line")
+
+    work_queue = queue.Queue()
+    daemon_mod._handle_telegram_message("/status", None, work_queue, threading.Event())
+
+    assert work_queue.empty()
