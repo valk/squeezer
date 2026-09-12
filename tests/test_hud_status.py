@@ -44,10 +44,9 @@ def test_build_status_line_includes_all_ranked_fragments():
         last_insight="fixed the flaky test",
     )
     assert "auto" in line
-    assert "squeezed 30%" in line
+    assert "squeezed 10%" in line
     assert "6% user" in line
     assert "max: 80% of the 5h window" in line
-    assert "total: 16%" in line
     assert "█" in line and "░" in line
     assert "5 open, 1 blocked (2 projects)" in line
     assert "fixed the flaky test" in line
@@ -65,7 +64,7 @@ def test_build_status_line_orders_squeezed_bar_user_before_mode():
         color=False,
     )
     bar = hud_status._context_bar(10.0, 6.0, 30.0, 80.0, color=False)
-    assert f"squeezed 30% {bar} 6% user" in line
+    assert f"squeezed 10% {bar} 6% user" in line
     assert line.index("6% user") < line.index("auto·paused")
 
 
@@ -93,7 +92,6 @@ def test_build_status_line_shows_zero_usage_bar_when_uncalibrated():
     assert "squeezed 0%" in line
     assert "0% user" in line
     assert "max: 0% of the 5h window" in line
-    assert "total: 0%" in line
 
 
 def test_build_status_line_no_projects_registered():
@@ -183,7 +181,7 @@ def test_build_status_line_color_false_has_no_ansi_escapes():
         color=False,
     )
     assert "\x1b" not in line
-    assert "squeezed 30%" in line
+    assert "squeezed 10%" in line
 
 
 def test_build_status_line_color_false_truncates_without_trailing_escape():
@@ -316,12 +314,10 @@ def test_current_status_line_shows_squeezer_usage_bar(tmp_path, monkeypatch):
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    # squeezer_window=4%, human_window=6%; allowed max=(100-20)-6=74%=7400
-    # tokens; 400/7400 ~= 5.4%; total=4+6=10%
-    assert "squeezed 5%" in line
+    # squeezer_window=4%, human_window=6%; allowed max=(100-20)-6=74%
+    assert "squeezed 4%" in line
     assert "6% user" in line
     assert "max: 74% of the 5h window" in line
-    assert "total: 10%" in line
 
 
 def test_current_status_line_shows_zero_percent_bar_when_squeezer_has_not_run_yet(tmp_path, monkeypatch):
@@ -331,7 +327,7 @@ def test_current_status_line_shows_zero_percent_bar_when_squeezer_has_not_run_ye
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=0, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    # human_window=10%; allowed max = (100-20)-10 = 70% of the 5h window
+    # squeezer_used=0 -> squeezer_window=0%; human_window=10%; allowed max = (100-20)-10 = 70%
     assert "squeezed 0%" in line
     assert "max: 70% of the 5h window" in line
 
@@ -346,7 +342,7 @@ def test_current_status_line_of_budget_reflects_no_reserve_hours(tmp_path, monke
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    # human_window=6%; allowed max = 100-6 = 94% = 9400 tokens; 400/9400 ~= 4.3%
+    # squeezer_window=4%; allowed max = 100-6 = 94% = 9400 tokens
     assert "squeezed 4%" in line
     assert "max: 94% of the 5h window" in line
 
@@ -363,28 +359,34 @@ def test_current_status_line_allowed_max_never_goes_below_zero(tmp_path, monkeyp
     _write_calibrated_state(tmp_path, total_used=9000, squeezer_used=0, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
+    # squeezer_used=0 -> squeezer_window=0%
     assert "squeezed 0%" in line
     assert "max: 0% of the 5h window" in line
     assert "90% user" in line
-    assert "total: 90%" in line
 
 
-def test_current_status_line_squeezed_percent_clamped_to_100(tmp_path, monkeypatch):
+def test_current_status_line_of_budget_percent_clamped_to_100_for_bar_color(tmp_path, monkeypatch):
     """If the human's own direct usage grows mid-window and shrinks squeezer's
     allowed maximum after squeezer already spent tokens against a larger one,
-    the raw ratio (squeezer_used / allowed_max) can run over 100% — displayed
-    "squeezed N%" must clamp to 100 rather than showing e.g. "108%", since a
-    percentage reading over 100 looks like a bug rather than "over budget"."""
+    the raw ratio (squeezer_used / allowed_max) can run over 100%. That ratio
+    (of_budget_percent) doesn't drive the displayed "squeezed: N%" text (see
+    _squeezer_usage_fragments — squeezed is squeezer_window_percent, its raw
+    share of the window), but it still feeds the bar's solid-zone color
+    gradient, so it must still clamp to 100 rather than passing "108%" into
+    _squeeze_color, which looks like a bug rather than "over budget"."""
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)
     _write_config(tmp_path)  # reserve_percent defaults to 20
     # human used 1000 (10%); allowed max = (100-20)-10 = 70% = 7000 tokens.
-    # squeezer used 7560 -> raw of_budget = 7560/7000 = 108%, clamped to 100%.
+    # squeezer used 7560 (75.6% of window) -> raw of_budget = 7560/7000 = 108%,
+    # clamped to 100%.
     _write_calibrated_state(tmp_path, total_used=8560, squeezer_used=7560, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    assert "squeezed 100%" in line
+    assert "squeezed 76%" in line
     assert "max: 70% of the 5h window" in line
+    _, _, of_budget, _ = hud_status._squeezer_usage_percents()
+    assert of_budget == 100.0
 
 
 def test_budget_percent_correctly_sums_multiple_squeezer_turns(tmp_path, monkeypatch):
@@ -423,11 +425,10 @@ def test_budget_percent_correctly_sums_multiple_squeezer_turns(tmp_path, monkeyp
     })
 
     line = hud_status.current_status_line()
-    # squeezer_used=270 (2.7% of window), human_used=100 (1%); allowed max =
-    # 80-1 = 79% = 7900 tokens; 270/7900 ~= 3.4%; total=2.7+1=3.7 -> "4%"
+    # squeezer_used=270 (2.7% of window); human_used=100 (1%); allowed max =
+    # 80-1 = 79% = 7900 tokens.
     assert "squeezed 3%" in line
     assert "max: 79% of the 5h window" in line
-    assert "total: 4%" in line
 
 
 def test_current_status_line_rolls_an_overdue_window_before_computing_percents(tmp_path, monkeypatch):
@@ -457,7 +458,7 @@ def test_current_status_line_rolls_an_overdue_window_before_computing_percents(t
 
     line = hud_status.current_status_line()
 
-    assert "squeezed 0%" in line
+    assert "0% user" in line
     assert hud_status.usage_lib.load_state()["window_start_ts"] != stale_start
 
 
@@ -549,11 +550,12 @@ def test_real_five_hour_percent_from_stdin_none_on_non_numeric_percentage(monkey
 
 # --- current_status_line reconciled against a real rate_limits percent ---
 
-def test_current_status_line_reconciles_total_to_real_five_hour_percent(tmp_path, monkeypatch):
-    """total: N% must land on exactly the real percent claude-hud shows
-    (via Claude Code's own rate_limits), not squeezer's own drifting
-    self-calibrated estimate — even when the opportunistic recalibration
-    itself fails open (no last_known_transcript_path set here)."""
+def test_current_status_line_reconciles_user_to_real_five_hour_percent(tmp_path, monkeypatch):
+    """human_window_percent (the "user: N%" figure) must land on the real
+    percent claude-hud shows (via Claude Code's own rate_limits), not
+    squeezer's own drifting self-calibrated estimate — even when the
+    opportunistic recalibration itself fails open (no
+    last_known_transcript_path set here)."""
     monkeypatch.setenv("SQUEEZER_HOME", str(tmp_path))
     monkeypatch.delenv("COLUMNS", raising=False)
     _write_config(tmp_path)
@@ -561,12 +563,11 @@ def test_current_status_line_reconciles_total_to_real_five_hour_percent(tmp_path
 
     line = hud_status.current_status_line(real_five_hour_percent=36.0)
     # squeezer's fraction of activity this window: 400/1000 = 0.4
-    # squeezer_window = 36 * 0.4 = 14.4; human_window = 21.6 -> "22%"
+    # squeezer_window = 36 * 0.4 = 14.4 -> "14%"; human_window = 21.6 -> "22%"
     # allowed max = (100-20) - 21.6 = 58.4% = 5840 (of the *old*, uncalibrated
     # estimated_total=10000, since no last_known_transcript_path is set here
-    # for calibrate_window to succeed against); squeezed = 400/5840 ~= 7%
-    assert "total: 36%" in line
-    assert "squeezed 7%" in line
+    # for calibrate_window to succeed against)
+    assert "squeezed 14%" in line
     assert "22% user" in line
     assert "max: 58% of the 5h window" in line
 
@@ -581,7 +582,7 @@ def test_current_status_line_falls_back_to_estimate_without_real_percent(tmp_pat
     _write_calibrated_state(tmp_path, total_used=1000, squeezer_used=400, estimated_window_total=10000)
 
     line = hud_status.current_status_line()
-    assert "total: 10%" in line
+    assert "squeezed 4%" in line
     assert "6% user" in line
 
 

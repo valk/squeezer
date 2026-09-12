@@ -138,15 +138,22 @@ def _squeezer_usage_fragments(
     budget_of_window_percent: float,
     color: bool = True,
 ) -> list[str]:
+    """The "squeezed: N%" text number is squeezer_window_percent itself —
+    its raw share of the 5h window, same figure the bar's solid
+    squeeze-colored zone is sized from — NOT 100 - human_window_percent.
+    That complement formula was tried and reverted: it forces squeezed+user
+    to sum to a fixed 100 regardless of how much of the window is actually
+    in use, so when the real total is e.g. 73% (claude-hud's own Usage bar),
+    it inflated squeezed to 93% instead of the true ~66%. squeezed+user
+    summing to the real total (not to 100) is what's actually wanted."""
     bar = _context_bar(
         squeezer_window_percent, human_window_percent,
         of_budget_percent, budget_of_window_percent,
         color=color,
     )
     return [
-        f"squeezed {of_budget_percent:.0f}% {bar} {human_window_percent:.0f}% user",
+        f"squeezed {squeezer_window_percent:.0f}% {bar} {human_window_percent:.0f}% user",
         f"max: {budget_of_window_percent:.0f}% of the 5h window",
-        f"total: {(squeezer_window_percent + human_window_percent):.0f}%",
     ]
 
 
@@ -220,18 +227,18 @@ def build_status_line(
     - human_window_percent ("user: N%"): the human's own direct usage
       (outside squeezer) as a raw share of the 5h window — the bar's solid
       blue zone.
-    - squeezer_budget_percent ("squeezed: N%"): squeezer's usage as a share
-      of its own *allowed maximum* this window — how close squeezer is to
-      the point it actually gets blocked, per usage_lib.budget_ok, and what
-      colors the bar's solid zone along the yellow -> green gradient.
-      Clamped to [0, 100] for display — the raw ratio can run over 100% if
-      the human's own direct usage grew (shrinking the allowed maximum, see
+    - squeezer_budget_percent: squeezer's usage as a share of its own
+      *allowed maximum* this window — how close squeezer is to the point it
+      actually gets blocked, per usage_lib.budget_ok. Not shown as its own
+      text number (see "squeezed: N%" below); only used to color the bar's
+      solid zone along the yellow -> green gradient. Clamped to [0, 100]
+      for that purpose — the raw ratio can run over 100% if the human's own
+      direct usage grew (shrinking the allowed maximum, see
       squeezer_budget_of_window_percent below) after squeezer had already
       used tokens against a larger one, but since this is recomputed fresh
       against the *current* allowed maximum on every call, "over budget"
       always means "over squeezer's current allowance right now," not a
-      stale reading — worth capping at 100 so it still reads as a plain
-      percentage.
+      stale reading.
     - squeezer_budget_of_window_percent ("max: N% of the 5h window"):
       squeezer's allowed maximum as a share of the 5h window — (100% minus
       the configured reserve, 0 during no_reserve_hours) minus however much
@@ -243,8 +250,11 @@ def build_status_line(
       squeezer, rather than measuring squeezer's usage against a reserve
       that ignores the human's own direct usage. Never below 0 (clamped for
       when the human alone has already crossed the threshold).
-    A fourth text fragment, "total: N%", is squeezer_window_percent +
-    human_window_percent — combined usage as a share of the 5h window.
+    The "squeezed: N%" text number is squeezer_window_percent itself — its
+    raw share of the 5h window, same figure the bar's solid zone is sized
+    from — so squeezed + human_window_percent ("user") sum to the window's
+    real combined usage (matching claude-hud's own Usage bar), not to a
+    fixed 100.
 
     color=False renders the bar with plain glyphs instead of ANSI escapes
     (see _context_bar) — used for the Telegram header, since Telegram's
